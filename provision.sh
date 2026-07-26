@@ -214,9 +214,43 @@ install_technitium() {
     fi
     printf '%s\n' "$_sha" > "$CREDS_DIR/technitium.sha256"
 
-    tar -xzf "$_tarball" -C "$TECHNITIUM_DIR" --strip-components=1 \
+    # The upstream tarball is flat: its files (DnsServerApp.dll, start.sh,
+    # the runtimes/ and www/ subdirectories, ...) sit at the archive root
+    # with no wrapping top-level directory. --strip-components=1 would
+    # discard every one of those root-level files - including
+    # DnsServerApp.dll, which alpine/technitium.initd invokes directly as
+    # command_args - and misplace the subdirectories underneath it.
+    # Confirmed by downloading the real tarball: `tar -tzf` lists 95 entries
+    # at the archive root (no common prefix), and extracting with
+    # --strip-components=1 yields only 47 files with DnsServerApp.dll gone,
+    # versus 95 files including DnsServerApp.dll without it.
+    #
+    # A re-run must not leave a mix of a previous install's files and this
+    # one's, so clear $TECHNITIUM_DIR first - except its "config"
+    # subdirectory. "config" is never in the tarball at all: it is created
+    # by alpine/technitium.initd's start_pre() (checkpath --directory) and
+    # populated by Technitium itself the first time it starts, holding the
+    # settings database and the operator's live DNS configuration. It is
+    # tracked via `lbu add /opt`, so on a diskless boot it is restored to
+    # $TECHNITIUM_DIR before provision.sh ever runs again. Deleting it here
+    # would silently wipe that configuration on every re-provision.
+    for _entry in "$TECHNITIUM_DIR"/*; do
+        [ -e "$_entry" ] || continue
+        [ "$(basename "$_entry")" = "config" ] && continue
+        rm -rf "$_entry"
+    done
+
+    tar -xzf "$_tarball" -C "$TECHNITIUM_DIR" \
         || die "could not extract Technitium"
     rm -f "$_tarball"
+
+    # Extraction reporting success is not proof the layout is what
+    # technitium.initd needs: verify the exact file it runs as command_args
+    # actually landed and is non-empty, so a future change to the tarball's
+    # layout fails loudly here instead of as a mysterious boot failure.
+    [ -s "$TECHNITIUM_DIR/DnsServerApp.dll" ] \
+        || die "Technitium extraction did not produce $TECHNITIUM_DIR/DnsServerApp.dll (missing or empty) - alpine/technitium.initd requires this exact path to start the DNS server; the upstream tarball layout may have changed"
+
     info "extracted to $TECHNITIUM_DIR (sha256 $_sha)"
 }
 
