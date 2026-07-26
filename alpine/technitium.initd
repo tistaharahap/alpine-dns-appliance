@@ -1,0 +1,95 @@
+#!/sbin/openrc-run
+# shellcheck shell=sh
+# technitium - Technitium DNS Server, bound to the address dns-ip claimed.
+#
+# Sourced by tests/test_technitium.sh, so everything below must be a variable
+# assignment or a function definition. No top-level side effects.
+
+name="technitium"
+description="Technitium DNS Server"
+
+TECHNITIUM_DIR="${TECHNITIUM_DIR:-/opt/technitium}"
+TECHNITIUM_API="${TECHNITIUM_API:-http://127.0.0.1:5380}"
+DNS_IP_RUNFILE="${DNS_IP_RUNFILE:-/run/dns-ip}"
+TECHNITIUM_CREDS="${TECHNITIUM_CREDS:-/etc/dns-appliance/admin-password}"
+
+supervisor="supervise-daemon"
+command="/usr/bin/dotnet"
+command_args="${TECHNITIUM_DIR}/DnsServerApp.dll"
+directory="$TECHNITIUM_DIR"
+pidfile="/run/technitium.pid"
+output_log="/var/log/technitium.log"
+error_log="/var/log/technitium.log"
+respawn_delay=5
+respawn_max=0
+
+depend() {
+    # The interlock: if dns-ip fails, OpenRC will not start this service, so
+    # the appliance never serves DNS from an address it did not deliberately
+    # claim.
+    need dns-ip
+    after firewall
+}
+
+# Echo the DNS listen endpoints for a claimed address.
+technitium_endpoints() {
+    [ -n "${1:-}" ] || return 1
+    printf '%s:53,127.0.0.1:53\n' "$1"
+}
+
+# Echo the address dns-ip claimed, or fail.
+claimed_ip() {
+    [ -s "$DNS_IP_RUNFILE" ] || return 1
+    _ip=$(cat "$DNS_IP_RUNFILE")
+    [ -n "$_ip" ] || return 1
+    printf '%s\n' "$_ip"
+}
+
+start_pre() {
+    if ! claimed_ip >/dev/null; then
+        eerror "$DNS_IP_RUNFILE is missing or empty - dns-ip did not claim an address"
+        eerror "Refusing to start the DNS server. Run: rc-service dns-ip start"
+        return 1
+    fi
+    checkpath --directory --mode 0755 "$TECHNITIUM_DIR/config"
+    checkpath --file --mode 0644 "$output_log"
+}
+
+start_post() {
+    # Re-apply the bind address whenever it changes, so moving the stick to a
+    # different subnet re-binds without manual intervention. Best effort: the
+    # server may still be starting, and a failure here must not take the
+    # service down, so it is logged rather than fatal.
+    _ip=$(claimed_ip) || return 0
+    _endpoints=$(technitium_endpoints "$_ip") || return 0
+
+    [ -s "$TECHNITIUM_CREDS" ] || return 0
+    _pass=$(cat "$TECHNITIUM_CREDS")
+
+    _wait=0
+    while [ "$_wait" -lt 60 ]; do
+        if curl -fsS "$TECHNITIUM_API/api/user/login?user=admin&pass=${_pass}" \
+            >/run/technitium-login.json 2>/dev/null; then
+            break
+        fi
+        _wait=$((_wait + 2))
+        sleep 2
+    done
+
+    _token=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' /run/technitium-login.json 2>/dev/null)
+    rm -f /run/technitium-login.json
+    if [ -z "$_token" ]; then
+        ewarn "Could not log in to the Technitium API to set the bind address."
+        ewarn "The server is running; set it manually in the web console."
+        return 0
+    fi
+
+    if curl -fsS -X POST "$TECHNITIUM_API/api/settings/set" \
+        --data-urlencode "token=${_token}" \
+        --data-urlencode "dnsServerLocalEndPoints=${_endpoints}" \
+        >/dev/null 2>&1; then
+        einfo "Technitium bound to ${_endpoints}"
+    else
+        ewarn "Failed to set dnsServerLocalEndPoints to ${_endpoints}"
+    fi
+}
