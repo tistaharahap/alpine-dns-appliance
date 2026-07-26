@@ -123,10 +123,11 @@ Once confirmed, the disk is erased and formatted as a single FAT32
 partition (MBR partition table, not GPT — see "The appliance will not boot
 at all" below for why), then populated with Alpine's boot files, `grub.cfg`,
 and this repo's `provision.sh`, `alpine/`, and `config/` directories under
-`provision/`. After `sync`, the script re-reads the boot-critical files
-back off the stick and checks their sizes against the source ISO before
-declaring success, ejects the disk, and prints a checklist for what to do
-next.
+`provision/`. After `sync`, the script re-reads the boot-critical files back
+off the stick: the kernel, initramfs, and modloop files are checked against
+the source ISO's sizes, while `bootx64.efi` and `.alpine-release` are
+checked for presence only. It then declares success, ejects the disk, and
+prints a checklist for what to do next.
 
 ### 2. Boot the target machine
 
@@ -154,16 +155,18 @@ From the root shell on the booted appliance:
 `<device>` is whatever the stick enumerated as — run `ls /media` if you're
 not sure; it's typically something like `sda1`. The script installs
 packages, fetches and installs Technitium, wires up the `dns-ip` and
-`technitium` OpenRC services, configures Technitium over its HTTP API, and
-persists everything with `lbu commit -d`. It is idempotent: if it fails
-partway through (a flaky network fetching a package, for instance), simply
-run it again — every step is written to converge rather than to
-double-apply.
+`technitium` OpenRC services (OpenRC being Alpine's service manager, the
+equivalent of systemd on most other distributions), configures Technitium
+over its HTTP API, and persists everything with `lbu commit -d`. It is
+idempotent: if it fails partway through (a flaky network fetching a
+package, for instance), simply run it again — every step is written to
+converge rather than to double-apply.
 
 When it finishes, it prints a report with the claimed IP address, the
-Technitium web console URL, and the generated admin password. Write the
-password down; it's also saved on the appliance itself (see "Technitium
-admin password" below).
+Technitium web console URL, and the admin password currently in effect —
+freshly generated on a first run, or the previously stored one on a re-run
+where it already authenticates. Write the password down; it's also saved on
+the appliance itself (see "Technitium admin password" below).
 
 ## Verifying it works
 
@@ -380,6 +383,7 @@ home.
 | File | Responsibility |
 | --- | --- |
 | `tests/assert.sh` | Assertion primitives and pass/fail counters. Sourced by every test file. |
+| `tests/test_harness.sh` | Exercises `assert.sh` itself, including that a failing assertion is actually counted as a failure. |
 | `tests/run-tests.sh` | Runs all `tests/test_*.sh`, then shellcheck if available. Single entry point. |
 | `tests/test_dns_ip.sh` | Exercises `dns-ip.initd` pure functions with a stubbed `arping_free`. |
 | `tests/test_technitium.sh` | Exercises `technitium.initd` endpoint construction and dependency declaration. |
