@@ -1,0 +1,188 @@
+#!/sbin/openrc-run
+# shellcheck shell=sh
+# dns-ip - discover the LAN, then claim a predictable static address.
+#
+# This service owns eth0 completely. /etc/network/interfaces deliberately has
+# no eth0 stanza, so nothing races this script for the address.
+#
+# Sourced by tests/test_dns_ip.sh, so everything below must be a variable
+# assignment or a function definition. No top-level side effects.
+
+name="dns-ip"
+description="Claim a static LAN address in the .53-.59 range"
+
+DNS_IP_IFACE="${DNS_IP_IFACE:-eth0}"
+DNS_IP_FIRST_OCTET=53
+DNS_IP_LAST_OCTET=59
+DNS_IP_RUNFILE="${DNS_IP_RUNFILE:-/run/dns-ip}"
+DNS_IP_LEASE="${DNS_IP_LEASE:-/run/dns-ip.lease}"
+
+depend() {
+    need localmount
+    before net
+}
+
+# Convert a dotted-quad netmask to a prefix length.
+# Echoes 0-32 on success. Returns 1 for anything malformed or non-contiguous
+# (255.0.255.0 is not a valid mask, and silently accepting it would produce a
+# wrong prefix rather than an honest failure).
+mask_to_prefix() {
+    _m="$1"
+    case "$_m" in
+        *.*.*.*.*) return 1 ;;
+        *.*.*.*) ;;
+        *) return 1 ;;
+    esac
+
+    _prefix=0
+    _partial_seen=0
+    _oifs="$IFS"
+    IFS=.
+    for _octet in $_m; do
+        case "$_octet" in
+            255) _bits=8 ;;
+            254) _bits=7 ;;
+            252) _bits=6 ;;
+            248) _bits=5 ;;
+            240) _bits=4 ;;
+            224) _bits=3 ;;
+            192) _bits=2 ;;
+            128) _bits=1 ;;
+            0)   _bits=0 ;;
+            *)   IFS="$_oifs"; return 1 ;;
+        esac
+        # Once a non-255 octet appears, every later octet must be 0.
+        if [ "$_partial_seen" -eq 1 ] && [ "$_bits" -ne 0 ]; then
+            IFS="$_oifs"
+            return 1
+        fi
+        [ "$_bits" -lt 8 ] && _partial_seen=1
+        _prefix=$((_prefix + _bits))
+    done
+    IFS="$_oifs"
+
+    printf '%s\n' "$_prefix"
+}
+
+# 192.168.1.42 -> 192.168.1
+octet_base() {
+    case "$1" in
+        *.*.*.*.*) return 1 ;;
+        *.*.*.*) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "${1%.*}"
+}
+
+# Is the address free?
+#
+# arping -D is duplicate address detection mode. For the pinned
+# iputils-arping 20250605-r2:
+#
+#   exit 0 -> DAD succeeded, NO replies received -> address is FREE
+#   exit 1 -> a reply arrived                    -> address is IN USE
+#
+# This is inverted relative to arping's ordinary reachability mode, and
+# relative to Thomas Habets' unrelated `arping` package, where a 0 exit means
+# the host answered. provision.sh pins the package version so that a change in
+# these semantics fails at install time rather than silently claiming an
+# address somebody else is already using.
+arping_free() {
+    arping -D -c 2 -w 3 -I "$1" "$2" >/dev/null 2>&1
+}
+
+# Echo the first free candidate in BASE.53 .. BASE.59, or return 1.
+find_free_ip() {
+    _iface="$1"
+    _base="$2"
+    _octet="$DNS_IP_FIRST_OCTET"
+    while [ "$_octet" -le "$DNS_IP_LAST_OCTET" ]; do
+        _candidate="${_base}.${_octet}"
+        if arping_free "$_iface" "$_candidate"; then
+            printf '%s\n' "$_candidate"
+            return 0
+        fi
+        _octet=$((_octet + 1))
+    done
+    return 1
+}
+
+# Run udhcpc purely to learn the subnet and gateway, then release.
+# Populates DNS_IP_LEASE with `ip=`, `subnet=`, `router=` lines.
+discover_lease() {
+    cat > /run/dns-ip-lease.script <<'LEASESCRIPT'
+#!/bin/sh
+[ "$1" = "bound" ] || exit 0
+{
+    echo "ip=$ip"
+    echo "subnet=$subnet"
+    echo "router=$router"
+} > /run/dns-ip.lease
+LEASESCRIPT
+    chmod +x /run/dns-ip-lease.script
+    rm -f "$DNS_IP_LEASE"
+    udhcpc -i "$DNS_IP_IFACE" -n -q -t 5 -s /run/dns-ip-lease.script >/dev/null 2>&1
+}
+
+start() {
+    ebegin "Claiming a LAN address for $DNS_IP_IFACE"
+
+    ip link set "$DNS_IP_IFACE" up 2>/dev/null
+
+    if ! discover_lease || [ ! -f "$DNS_IP_LEASE" ]; then
+        eerror "DHCP discovery failed on $DNS_IP_IFACE - cannot determine the subnet"
+        eerror "Technitium will not be started. Check the cable, switch, and DHCP server."
+        eend 1
+        return 1
+    fi
+
+    # shellcheck disable=SC1090  # runtime-generated lease file, path is known
+    . "$DNS_IP_LEASE"
+
+    if [ -z "${ip:-}" ] || [ -z "${router:-}" ]; then
+        eerror "DHCP lease did not include an address and gateway - refusing to continue"
+        eend 1
+        return 1
+    fi
+
+    if _prefix=$(mask_to_prefix "${subnet:-}"); then
+        einfo "Discovered subnet mask ${subnet} (/${_prefix}), gateway ${router}"
+    else
+        _prefix=24
+        ewarn "Could not parse netmask '${subnet:-<empty>}' from the DHCP lease;"
+        ewarn "assuming /24. If this LAN is not a /24 the claimed address may be"
+        ewarn "unreachable - set the mask correctly on your DHCP server."
+    fi
+
+    if ! _base=$(octet_base "$ip"); then
+        eerror "DHCP lease address '$ip' is not a valid IPv4 address"
+        eend 1
+        return 1
+    fi
+
+    # Discovery is finished. Drop the DHCP address before probing, so our own
+    # lease cannot answer the duplicate-address probes.
+    ip addr flush dev "$DNS_IP_IFACE"
+
+    if ! _claimed=$(find_free_ip "$DNS_IP_IFACE" "$_base"); then
+        eerror "no IP available in .53-.59, refusing to start"
+        eerror "All of ${_base}.53 through ${_base}.59 answered ARP probes."
+        eerror "Free one of them, or move the appliance to another subnet."
+        eend 1
+        return 1
+    fi
+
+    ip addr add "${_claimed}/${_prefix}" dev "$DNS_IP_IFACE"
+    ip route add default via "$router" dev "$DNS_IP_IFACE" 2>/dev/null
+
+    printf '%s\n' "$_claimed" > "$DNS_IP_RUNFILE"
+    einfo "Claimed ${_claimed}/${_prefix} on $DNS_IP_IFACE"
+    eend 0
+}
+
+stop() {
+    ebegin "Releasing the claimed LAN address"
+    ip addr flush dev "$DNS_IP_IFACE" 2>/dev/null
+    rm -f "$DNS_IP_RUNFILE" "$DNS_IP_LEASE"
+    eend 0
+}
