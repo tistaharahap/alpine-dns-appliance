@@ -1,0 +1,5 @@
+downloads/
+*.iso
+*.iso.sha256
+*.sha256
+.DS_Store
