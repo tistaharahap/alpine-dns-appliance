@@ -1,0 +1,10 @@
+# Ad-block list URLs for Technitium DNS Server, one per line.
+# Lines beginning with # are comments; a # anywhere on a line starts a comment.
+# Whitespace is stripped. URLs longer than 255 characters are skipped with a
+# warning, because /api/settings/set rejects them.
+#
+# Applied by provision.sh via the Technitium settings API. To change these
+# after provisioning, edit this file and re-run provision.sh, or edit the list
+# directly in the web console and run `lbu commit -d`.
+
+https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
