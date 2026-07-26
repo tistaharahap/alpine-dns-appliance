@@ -53,6 +53,36 @@ assert_eq "https://example.com/ok.txt" "$(blocklist_urls "$_tmp/long.txt" 2>/dev
 assert_contains "$(blocklist_urls "$_tmp/long.txt" 2>&1 >/dev/null)" "255" \
     "blocklist_urls warns about the skipped URL"
 
+# --- forwarder_urls ---------------------------------------------------------
+# Forwarders share blocklist parsing but have no length cap: DoH URLs are
+# short, and silently dropping one would send queries somewhere unintended.
+cat > "$_tmp/fwd.txt" <<'FWD'
+# upstream resolvers
+https://cloudflare-dns.com/dns-query
+
+   https://dns.quad9.net/dns-query
+FWD
+assert_eq "https://cloudflare-dns.com/dns-query,https://dns.quad9.net/dns-query" \
+    "$(forwarder_urls "$_tmp/fwd.txt")" \
+    "forwarder_urls joins forwarders and drops comments and blanks"
+
+# Every line commented out means "resolve recursively". Technitium's API is
+# told that by the literal string `false`, not by an empty list - sending an
+# empty one would leave the existing forwarders in place.
+printf '# all commented out\n\n' > "$_tmp/fwd-empty.txt"
+assert_eq "" "$(forwarder_urls "$_tmp/fwd-empty.txt")" \
+    "forwarder_urls yields empty when every forwarder is commented out"
+
+# The 255-char cap belongs to blockListUrls only; it must not leak here. Build
+# an over-cap entry and assert it survives verbatim, rather than asserting a
+# hand-computed length.
+_long_fwd="https://example.com/$(i=0; while [ $i -lt 250 ]; do printf 'x'; i=$((i + 1)); done)"
+printf '%s\n' "$_long_fwd" > "$_tmp/fwd-long.txt"
+assert_eq "$_long_fwd" "$(forwarder_urls "$_tmp/fwd-long.txt" 2>/dev/null)" \
+    "forwarder_urls does not apply the blocklist length cap"
+assert_eq "" "$(blocklist_urls "$_tmp/fwd-long.txt" 2>/dev/null)" \
+    "the same over-length entry IS dropped by blocklist_urls"
+
 # --- boot_medium_dir / lbu_media_name ---------------------------------------
 mkdir -p "$_tmp/media/sda1/provision"
 : > "$_tmp/media/sda1/provision/provision.sh"

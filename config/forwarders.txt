@@ -1,0 +1,27 @@
+# Upstream DNS forwarders for Technitium, one per line.
+# Lines beginning with # are comments; a # anywhere on a line starts a comment.
+# Whitespace is stripped.
+#
+# WHY FORWARD INSTEAD OF RECURSE
+#
+# Technitium's default is full recursive resolution: it talks to the root
+# servers itself. That is the purist option, but it breaks on any network
+# that intercepts outbound port 53 - common on consumer ISP connections.
+# The hijacked responses arrive stripped of DNSSEC records, so validation
+# fails and every lookup returns SERVFAIL with an error like:
+#
+#     Attack detected! Missing non-existence proof (No Data) for com. A IN
+#
+# Forwarding over DNS-over-HTTPS avoids this entirely: the query is encrypted
+# and travels over 443, so no middlebox can see or rewrite it.
+#
+# The protocol used for these is set by FORWARDER_PROTOCOL in provision.sh
+# (default Https). If you list plain IP addresses here instead of URLs, change
+# that to Udp - or you will get no resolution at all.
+#
+# To go back to recursive resolution, comment every line out. provision.sh
+# then sends `forwarders=false`, which is how Technitium's API is told to drop
+# its forwarders and resolve independently.
+
+https://cloudflare-dns.com/dns-query
+https://dns.quad9.net/dns-query

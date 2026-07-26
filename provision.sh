@@ -32,6 +32,17 @@ BLOCKLIST_MAX_URL_LEN=255
 # interface once the appliance is running.
 PROVISION_IFACE="${PROVISION_IFACE:-eth0}"
 
+# Transport for the upstream forwarders in config/forwarders.txt.
+# Valid values per Technitium's API: Udp, Tcp, Tls, Https, Quic.
+# Https (DNS-over-HTTPS) is the default because it survives the port-53
+# interception that is common on consumer ISP links. If you replace the
+# forwarder URLs with plain IP addresses, set this to Udp.
+FORWARDER_PROTOCOL="${FORWARDER_PROTOCOL:-Https}"
+
+# Used only if config/forwarders.txt is missing, e.g. a stick built before
+# that file existed. The file is the real source of truth.
+DEFAULT_FORWARDERS="https://cloudflare-dns.com/dns-query,https://dns.quad9.net/dns-query"
+
 # Overridable so the test suite can feed a fixture instead of the live kernel.
 PROC_MOUNTS="${PROC_MOUNTS:-/proc/mounts}"
 
@@ -57,14 +68,17 @@ die()  { printf 'ERR %s\n' "$*" >&2; exit 1; }
 # Skips any URL over the API's 255-character limit, with a warning on stderr:
 # the API rejects the entire request if one entry is too long, so silently
 # passing it through would break blocking altogether.
-blocklist_urls() {
+# Join the non-comment, non-blank lines of file $1 with commas.
+# $2 caps entry length, skipping longer ones with a warning; 0 means no cap.
+comma_list() {
+    _max="${2:-0}"
     _out=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%%#*}"
         _line=$(printf '%s' "$_line" | tr -d '[:space:]')
         [ -n "$_line" ] || continue
-        if [ "${#_line}" -gt "$BLOCKLIST_MAX_URL_LEN" ]; then
-            warn "skipping blocklist URL over $BLOCKLIST_MAX_URL_LEN chars: $(printf '%s' "$_line" | cut -c1-40)..."
+        if [ "$_max" -gt 0 ] && [ "${#_line}" -gt "$_max" ]; then
+            warn "skipping entry over $_max chars: $(printf '%s' "$_line" | cut -c1-40)..."
             continue
         fi
         if [ -z "$_out" ]; then
@@ -74,6 +88,17 @@ blocklist_urls() {
         fi
     done < "$1"
     printf '%s\n' "$_out"
+}
+
+blocklist_urls() {
+    comma_list "$1" "$BLOCKLIST_MAX_URL_LEN"
+}
+
+# Forwarders are not length-capped: the 255-char limit is a blockListUrls
+# constraint, and silently dropping a forwarder would send queries somewhere
+# other than where the operator asked.
+forwarder_urls() {
+    comma_list "$1" 0
 }
 
 # /media/sda1/provision/provision.sh -> /media/sda1
@@ -562,6 +587,28 @@ configure_technitium() {
     _lists=$(blocklist_urls "$MEDIUM_DIR/provision/config/blocklists.txt")
     _endpoints="${CLAIMED_IP}:53,127.0.0.1:53"
 
+    # Forwarders. Technitium's default is full recursion, which breaks on any
+    # network that intercepts outbound port 53 - the hijacked responses come
+    # back without DNSSEC records and every lookup SERVFAILs with "Missing
+    # non-existence proof". Forwarding over DoH is encrypted on 443, so no
+    # middlebox can rewrite it.
+    #
+    # An empty list is NOT the same as no forwarders: the API needs the
+    # literal string "false" to drop existing ones and go back to recursion.
+    _fwd_file="$MEDIUM_DIR/provision/config/forwarders.txt"
+    if [ -f "$_fwd_file" ]; then
+        _forwarders=$(forwarder_urls "$_fwd_file")
+    else
+        _forwarders="$DEFAULT_FORWARDERS"
+        warn "$_fwd_file not found; using built-in default forwarders"
+    fi
+    if [ -z "$_forwarders" ]; then
+        _forwarders="false"
+        info "no forwarders configured - Technitium will resolve recursively"
+    else
+        info "forwarding over $FORWARDER_PROTOCOL to $_forwarders"
+    fi
+
     _settings_resp="/tmp/technitium-settings.json"
     curl -fsS -X POST "$TECHNITIUM_API/api/settings/set" \
         --data-urlencode "token=$_token" \
@@ -569,6 +616,10 @@ configure_technitium() {
         --data-urlencode "blockListUrls=$_lists" \
         --data-urlencode "blockListUrlUpdateIntervalHours=24" \
         --data-urlencode "dnsServerLocalEndPoints=$_endpoints" \
+        --data-urlencode "forwarders=$_forwarders" \
+        --data-urlencode "forwarderProtocol=$FORWARDER_PROTOCOL" \
+        --data-urlencode "concurrentForwarding=true" \
+        --data-urlencode "dnssecValidation=true" \
         >"$_settings_resp" 2>/dev/null
 
     if ! api_ok "$_settings_resp"; then
