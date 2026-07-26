@@ -36,6 +36,14 @@ checksum_ok "$_tmp/f" "$_expected"; assert_rc 0 $? "checksum_ok accepts a matchi
 checksum_ok "$_tmp/f" "deadbeef"; assert_rc 1 $? "checksum_ok rejects a mismatched digest"
 checksum_ok "$_tmp/absent" "$_expected"; assert_rc 1 $? "checksum_ok rejects a missing file"
 
+# --- same_size ---------------------------------------------------------------
+printf 'hello' > "$_tmp/same_a"
+printf 'world' > "$_tmp/same_b"
+same_size "$_tmp/same_a" "$_tmp/same_b"; assert_rc 0 $? "same_size accepts two files of equal size"
+printf 'hello there' > "$_tmp/same_c"
+same_size "$_tmp/same_a" "$_tmp/same_c"; assert_rc 1 $? "same_size rejects files of differing size"
+same_size "$_tmp/same_a" "$_tmp/absent"; assert_rc 1 $? "same_size rejects a missing file"
+
 # --- plist parsing and disk safety -----------------------------------------
 _mk_plist() {
     # $1 Internal, $2 Ejectable, $3 WholeDisk  (each "true" or "false")

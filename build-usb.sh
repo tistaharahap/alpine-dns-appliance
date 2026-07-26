@@ -33,7 +33,7 @@ die()  { printf '\033[1;31mERR\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ------------------------------------------------------------------ cleanup --
 cleanup() {
-    if [ -n "$ISO_MOUNT" ] && mount | grep -q " $ISO_MOUNT "; then
+    if [ -n "$ISO_MOUNT" ] && is_mounted "$ISO_MOUNT"; then
         umount "$ISO_MOUNT" 2>/dev/null || true
     fi
     if [ -n "$ISO_DEVICE" ]; then
@@ -65,6 +65,26 @@ sha256_of() {
 checksum_ok() {
     [ -f "$1" ] || return 1
     [ "$(sha256_of "$1")" = "$2" ]
+}
+
+# Compare the byte size of two files. Returns 0 if they exist and match,
+# 1 if either is missing/unreadable or the sizes differ. Used to check a
+# copy landed intact without hashing large files.
+same_size() {
+    local size_a size_b
+    size_a="$(stat -f%z "$1" 2>/dev/null)" || return 1
+    size_b="$(stat -f%z "$2" 2>/dev/null)" || return 1
+    [ -n "$size_a" ] && [ "$size_a" = "$size_b" ]
+}
+
+# True if the given directory is a mount point: its device id differs from
+# its parent's. Avoids parsing `mount` output (and regex-escaping a path)
+# to answer the same question.
+is_mounted() {
+    local dir="$1" parent
+    [ -d "$dir" ] || return 1
+    parent="$(dirname "$dir")"
+    [ "$(stat -f%d "$dir" 2>/dev/null)" != "$(stat -f%d "$parent" 2>/dev/null)" ]
 }
 
 # Read one key out of a `diskutil info -plist` document.
@@ -180,7 +200,12 @@ select_target() {
     echo
 
     printf 'Target disk identifier (e.g. disk4), or Ctrl-C to abort: '
-    read -r TARGET_DISK
+    # `read` fails on EOF (closed/empty stdin). Under `set -e` a bare `read`
+    # would abort the script right here, before the check below ever runs,
+    # exiting silently with no message. Trap that explicitly so EOF gets the
+    # same clear diagnostic as any other empty answer - still fail-safe,
+    # just no longer silent.
+    read -r TARGET_DISK || TARGET_DISK=""
     [ -n "$TARGET_DISK" ] || die "no disk identifier given"
     TARGET_DISK="${TARGET_DISK#/dev/}"
 
@@ -198,7 +223,11 @@ select_target() {
     echo
     warn "Everything on the disk above will be destroyed. There is no undo."
     printf 'Type the identifier again (%s) to confirm: ' "$TARGET_DISK"
-    read -r confirm
+    # Same EOF hazard as the read above: fall back to an empty confirmation
+    # rather than letting `set -e` kill the script before the mismatch
+    # message can print. An empty confirm never equals $TARGET_DISK, so this
+    # stays fail-safe.
+    read -r confirm || confirm=""
     [ "$confirm" = "$TARGET_DISK" ] || die "confirmation did not match - nothing was changed"
 }
 
@@ -254,6 +283,32 @@ populate_stick() {
 
     log "Flushing writes"
     sync
+
+    verify_stick_copy "$dest"
+}
+
+# Confirm the boot-critical files actually landed on the stick intact,
+# rather than trusting `cp`'s exit code alone: `set -e` catches a nonzero
+# exit but not a copy that exits 0 having written a truncated file (stick
+# failing, pulled mid-write, or full). Runs after `sync` on purpose, so
+# `stat` is checking what was actually flushed rather than a page-cache
+# copy of the source read back before the write completed.
+verify_stick_copy() {
+    local dest="$1" file
+
+    log "Verifying the copy"
+
+    for file in boot/vmlinuz-lts boot/initramfs-lts boot/modloop-lts; do
+        [ -f "$dest/$file" ] || die "verification failed: $dest/$file is missing"
+        same_size "$ISO_MOUNT/$file" "$dest/$file" \
+            || die "verification failed: $file size does not match the source ISO (copy is truncated or corrupt)"
+    done
+
+    for file in efi/boot/bootx64.efi .alpine-release; do
+        [ -f "$dest/$file" ] || die "verification failed: $dest/$file is missing"
+    done
+
+    echo "    boot files present and correctly sized"
 }
 
 eject_target() {
