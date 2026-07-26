@@ -26,6 +26,8 @@ mask_to_prefix "banana" >/dev/null 2>&1; assert_rc 1 $? "mask_to_prefix rejects 
 mask_to_prefix "255.255.255" >/dev/null 2>&1; assert_rc 1 $? "mask_to_prefix rejects 3 octets"
 mask_to_prefix "255.0.255.0" >/dev/null 2>&1; assert_rc 1 $? "mask_to_prefix rejects non-contiguous mask"
 mask_to_prefix "255.255.200.0" >/dev/null 2>&1; assert_rc 1 $? "mask_to_prefix rejects invalid octet"
+mask_to_prefix "255.255.255." >/dev/null 2>&1; assert_rc 1 $? "mask_to_prefix rejects trailing empty octet"
+mask_to_prefix "255.255..0" >/dev/null 2>&1; assert_rc 1 $? "mask_to_prefix rejects doubled dot"
 
 # --- octet_base -------------------------------------------------------------
 assert_eq "192.168.1" "$(octet_base 192.168.1.42)" "octet_base strips the host octet"
@@ -34,6 +36,8 @@ octet_base "nope" >/dev/null 2>&1; assert_rc 1 $? "octet_base rejects malformed 
 octet_base "a.b.c.d" >/dev/null 2>&1; assert_rc 1 $? "octet_base rejects non-numeric quad"
 octet_base "999.1.1.1" >/dev/null 2>&1; assert_rc 1 $? "octet_base rejects out-of-range octet"
 octet_base "192.168.+1.1" >/dev/null 2>&1; assert_rc 1 $? "octet_base rejects octet with a leading +"
+octet_base "192.168.1." >/dev/null 2>&1; assert_rc 1 $? "octet_base rejects trailing empty octet"
+octet_base "192.168..1" >/dev/null 2>&1; assert_rc 1 $? "octet_base rejects doubled dot"
 
 # --- find_free_ip -----------------------------------------------------------
 assert_eq "53" "$DNS_IP_FIRST_OCTET" "candidate range starts at .53"

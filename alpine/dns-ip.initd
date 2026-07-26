@@ -35,11 +35,24 @@ mask_to_prefix() {
         *) return 1 ;;
     esac
 
+    # Pull the four dot-separated components apart with parameter expansion
+    # rather than an unquoted `for` over IFS=. splitting: POSIX word-splitting
+    # silently drops a trailing empty field (e.g. "255.255.255." would be seen
+    # as only three octets), which would let a malformed mask slip through.
+    # %%.* / #*. preserve empty components anywhere - leading, embedded, or
+    # trailing - so they can be rejected below like any other bad octet.
+    _rest="$_m"
+    _o1="${_rest%%.*}"
+    _rest="${_rest#*.}"
+    _o2="${_rest%%.*}"
+    _rest="${_rest#*.}"
+    _o3="${_rest%%.*}"
+    _o4="${_rest#*.}"
+
     _prefix=0
     _partial_seen=0
-    _oifs="$IFS"
-    IFS=.
-    for _octet in $_m; do
+    set -- "$_o1" "$_o2" "$_o3" "$_o4"
+    for _octet in "$@"; do
         case "$_octet" in
             255) _bits=8 ;;
             254) _bits=7 ;;
@@ -50,17 +63,15 @@ mask_to_prefix() {
             192) _bits=2 ;;
             128) _bits=1 ;;
             0)   _bits=0 ;;
-            *)   IFS="$_oifs"; return 1 ;;
+            *)   return 1 ;;
         esac
         # Once a non-255 octet appears, every later octet must be 0.
         if [ "$_partial_seen" -eq 1 ] && [ "$_bits" -ne 0 ]; then
-            IFS="$_oifs"
             return 1
         fi
         [ "$_bits" -lt 8 ] && _partial_seen=1
         _prefix=$((_prefix + _bits))
     done
-    IFS="$_oifs"
 
     printf '%s\n' "$_prefix"
 }
@@ -77,20 +88,29 @@ octet_base() {
         *) return 1 ;;
     esac
 
-    _oifs="$IFS"
-    IFS=.
-    for _octet in $1; do
+    # See the matching comment in mask_to_prefix(): parameter expansion is
+    # used instead of an unquoted IFS=. `for` loop so a trailing (or
+    # embedded) empty component is not silently dropped by word-splitting.
+    _input="$1"
+    _rest="$_input"
+    _o1="${_rest%%.*}"
+    _rest="${_rest#*.}"
+    _o2="${_rest%%.*}"
+    _rest="${_rest#*.}"
+    _o3="${_rest%%.*}"
+    _o4="${_rest#*.}"
+
+    set -- "$_o1" "$_o2" "$_o3" "$_o4"
+    for _octet in "$@"; do
         case "$_octet" in
-            ''|*[!0-9]*) IFS="$_oifs"; return 1 ;;
+            ''|*[!0-9]*) return 1 ;;
         esac
         if [ "$_octet" -gt 255 ]; then
-            IFS="$_oifs"
             return 1
         fi
     done
-    IFS="$_oifs"
 
-    printf '%s\n' "${1%.*}"
+    printf '%s\n' "${_input%.*}"
 }
 
 # Is the address free?
