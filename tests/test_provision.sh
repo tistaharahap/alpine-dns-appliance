@@ -1,0 +1,71 @@
+#!/bin/sh
+# Exercises the pure logic in provision.sh. Nothing here touches apk or a network.
+set -u
+. "$(dirname "$0")/assert.sh"
+
+ADS_SOURCE_ONLY=1
+export ADS_SOURCE_ONLY
+# shellcheck disable=SC1091  # sourced for its functions, main() is guarded
+. "$(dirname "$0")/../provision.sh"
+
+_tmp=$(mktemp -d)
+trap 'rm -rf "$_tmp"' EXIT
+
+# --- pinned constants -------------------------------------------------------
+assert_eq "dns-appliance" "$HOSTNAME_WANTED" "hostname is dns-appliance"
+assert_eq "/opt/technitium" "$TECHNITIUM_DIR" "Technitium installs to /opt/technitium"
+assert_eq "255" "$BLOCKLIST_MAX_URL_LEN" "blocklist URL cap matches the API limit"
+assert_contains "$APK_PACKAGES" "aspnetcore10-runtime" "installs the .NET 10 runtime"
+assert_contains "$APK_PACKAGES" "iputils-arping=20250605-r2" "arping version is pinned"
+assert_contains "$APK_PACKAGES" "libmsquic" "installs libmsquic"
+assert_contains "$APK_PACKAGES" "icu-libs" "installs icu-libs"
+assert_not_contains "$APK_PACKAGES" "dotnet-runtime" "does not use Microsoft's glibc build"
+
+# --- blocklist_urls ---------------------------------------------------------
+cat > "$_tmp/lists.txt" <<'LISTS'
+# a comment
+https://example.com/a.txt
+
+   https://example.com/b.txt
+https://example.com/c.txt   # trailing comment
+LISTS
+assert_eq "https://example.com/a.txt,https://example.com/b.txt,https://example.com/c.txt" \
+    "$(blocklist_urls "$_tmp/lists.txt")" \
+    "blocklist_urls joins URLs and drops comments and blanks"
+
+printf '# only comments\n\n' > "$_tmp/empty.txt"
+assert_eq "" "$(blocklist_urls "$_tmp/empty.txt")" "blocklist_urls yields empty for a comment-only file"
+
+# A URL over the 255-char API limit must be skipped, not silently truncated.
+{
+    printf 'https://example.com/ok.txt\n'
+    printf 'https://example.com/'
+    i=0; while [ $i -lt 250 ]; do printf 'x'; i=$((i + 1)); done
+    printf '\n'
+} > "$_tmp/long.txt"
+assert_eq "https://example.com/ok.txt" "$(blocklist_urls "$_tmp/long.txt" 2>/dev/null)" \
+    "blocklist_urls skips URLs over the 255 character limit"
+assert_contains "$(blocklist_urls "$_tmp/long.txt" 2>&1 >/dev/null)" "255" \
+    "blocklist_urls warns about the skipped URL"
+
+# --- boot_medium_dir / lbu_media_name ---------------------------------------
+mkdir -p "$_tmp/media/sda1/provision"
+: > "$_tmp/media/sda1/provision/provision.sh"
+assert_eq "$_tmp/media/sda1" "$(boot_medium_dir "$_tmp/media/sda1/provision/provision.sh")" \
+    "boot_medium_dir climbs out of provision/"
+assert_eq "sda1" "$(lbu_media_name "$_tmp/media/sda1")" "lbu_media_name takes the basename"
+boot_medium_dir "$_tmp/nope/provision/provision.sh" >/dev/null 2>&1
+assert_rc 1 $? "boot_medium_dir fails when the path does not exist"
+
+# --- random_password --------------------------------------------------------
+_pw=$(random_password)
+assert_eq "24" "$(printf '%s' "$_pw" | wc -c | tr -d ' ')" "random_password is 24 characters"
+assert_eq "" "$(printf '%s' "$_pw" | tr -d 'A-Za-z0-9')" "random_password is alphanumeric only"
+
+# Two consecutive calls must differ. A generator stuck on a constant would
+# silently give every appliance the same admin password.
+_pw_a=$(random_password)
+_pw_b=$(random_password)
+assert_not_contains "$_pw_a" "$_pw_b" "random_password output varies between calls"
+
+test_summary "test_provision"
