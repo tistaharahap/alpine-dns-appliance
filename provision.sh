@@ -66,8 +66,18 @@ MEDIUM_REMOUNTED_RW=0
 APK_PACKAGES="aspnetcore10-runtime libmsquic icu-libs icu-data-full iputils-arping=20250605-r2 curl"
 
 # ------------------------------------------------------------------ logging --
-log()  { printf '\n==> %s\n' "$*"; }
-info() { printf '    %s\n' "$*"; }
+#
+# log() and info() record where we are as a side effect. Under `set -e` a
+# command failing in an unguarded spot terminates the script with no output
+# whatsoever - which is exactly how this script died on real hardware, leaving
+# an operator staring at an OpenRC line that had nothing to do with it. The
+# EXIT trap turns that silence into a located failure.
+CURRENT_STEP="startup"
+CURRENT_DETAIL=""
+PROVISION_COMPLETE=0
+
+log()  { CURRENT_STEP="$*"; CURRENT_DETAIL=""; printf '\n==> %s\n' "$*"; }
+info() { CURRENT_DETAIL="$*"; printf '    %s\n' "$*"; }
 warn() { printf '/!\\ %s\n' "$*" >&2; }
 die()  { printf 'ERR %s\n' "$*" >&2; exit 1; }
 
@@ -309,6 +319,26 @@ remount rw is usually failing, or has its physical write-protect switch on."
     else
         info "already mounted read-write"
     fi
+}
+
+# Single EXIT handler: restore the medium, and if we are leaving early, say
+# where from. A bare `set -e` death prints nothing at all on its own.
+on_exit() {
+    _rc=$?
+    restore_medium_ro
+    if [ "$PROVISION_COMPLETE" != "1" ]; then
+        printf '\n' >&2
+        printf 'ERR provisioning did not finish.\n' >&2
+        printf '    step:      %s\n' "$CURRENT_STEP" >&2
+        [ -n "$CURRENT_DETAIL" ] && printf '    last note: %s\n' "$CURRENT_DETAIL" >&2
+        printf '    exit code: %s\n' "$_rc" >&2
+        printf '\n' >&2
+        printf '    If nothing above explains it, a command failed where `set -e`\n' >&2
+        printf '    terminates the script silently. Re-run with tracing to see the\n' >&2
+        printf '    exact last command:\n' >&2
+        printf '        sh -x %s >/tmp/prov.log 2>&1; tail -40 /tmp/prov.log\n' "$0" >&2
+    fi
+    return 0
 }
 
 # Put the boot medium back to read-only if we remounted it. Runs on every exit
@@ -830,7 +860,7 @@ REPORT
 }
 
 main() {
-    trap restore_medium_ro EXIT INT TERM
+    trap on_exit EXIT INT TERM
     require_root
     locate_medium
     setup_network
@@ -841,6 +871,7 @@ main() {
     start_services
     configure_technitium
     persist
+    PROVISION_COMPLETE=1
     report
 }
 
