@@ -228,8 +228,15 @@ a reboot unless you explicitly commit it.**
   ```
 
   `/opt` — where Technitium lives — is already tracked; `provision.sh` adds
-  it (along with `/etc/dns-appliance`) during provisioning, so you don't
-  need to add it again.
+  it (along with `/etc/dns-appliance` and both init scripts) during
+  provisioning, so you don't need to add them again.
+
+  One trap deserves its own warning: **`/etc/init.d` is excluded from `lbu`
+  even though the rest of `/etc` is included.** apk's backup audit assumes
+  init scripts come from packages, so a custom script placed there silently
+  vanishes on reboot — leaving a runlevel symlink pointing at nothing and
+  `rc-service: service '<name>' does not exist`. If you ever add your own
+  service, `lbu add /etc/init.d/<name>` is mandatory, not optional.
 
 Before committing, `lbu status` lists which tracked files have changed
 since the last commit, and `lbu diff` shows the actual diff. Both are handy

@@ -812,6 +812,18 @@ persist() {
     lbu add "$CREDS_DIR" >/dev/null 2>&1 \
         || die "lbu add $CREDS_DIR failed - the admin password will NOT survive a reboot; re-run provision.sh"
 
+    # The init scripts must be added EXPLICITLY, and this is the least obvious
+    # persistence trap in the whole appliance: apk's backup audit - which lbu
+    # uses to decide what to package - has a BUILT-IN exclusion for
+    # /etc/init.d, on the assumption that init scripts come from packages.
+    # Ours do not. Without these entries the apkovl restores the hostname,
+    # the runlevel symlinks, /opt, everything - except the two scripts the
+    # symlinks point at, so the appliance boots to 'service does not exist'
+    # and serves nothing. Observed on real hardware; verified against lbu:
+    # a custom file in /etc is captured, the same file in /etc/init.d is not.
+    lbu add /etc/init.d/dns-ip /etc/init.d/technitium >/dev/null 2>&1 \
+        || die "lbu add for the init scripts failed - the services will NOT survive a reboot; re-run provision.sh"
+
     # lbu add exiting 0 is not proof either - the same "reported success"
     # gap this whole fix closes. Verify against lbu's own persisted include
     # list (/etc/apk/protected_paths.d/lbu.list, where `lbu add` records
@@ -834,7 +846,11 @@ persist() {
         || die "lbu add /opt reported success but +$_opt_entry is not in $_lbu_include_list - Technitium will NOT survive a reboot"
     grep -qxF "+$_creds_entry" "$_lbu_include_list" 2>/dev/null \
         || die "lbu add $CREDS_DIR reported success but +$_creds_entry is not in $_lbu_include_list - the admin password will NOT survive a reboot"
-    info "tracking /opt and $CREDS_DIR"
+    for _svc in dns-ip technitium; do
+        grep -qxF "+etc/init.d/$_svc" "$_lbu_include_list" 2>/dev/null \
+            || die "lbu add reported success but +etc/init.d/$_svc is not in $_lbu_include_list - the $_svc service will NOT survive a reboot"
+    done
+    info "tracking /opt, $CREDS_DIR, and both init scripts"
 
     lbu commit -d || die "lbu commit failed - the configuration will NOT survive a reboot"
     info "committed to $MEDIUM_DIR"
