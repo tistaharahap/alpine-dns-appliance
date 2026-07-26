@@ -31,6 +31,9 @@ mask_to_prefix "255.255.200.0" >/dev/null 2>&1; assert_rc 1 $? "mask_to_prefix r
 assert_eq "192.168.1" "$(octet_base 192.168.1.42)" "octet_base strips the host octet"
 assert_eq "10.0.0"    "$(octet_base 10.0.0.7)"     "octet_base on a 10/8 address"
 octet_base "nope" >/dev/null 2>&1; assert_rc 1 $? "octet_base rejects malformed input"
+octet_base "a.b.c.d" >/dev/null 2>&1; assert_rc 1 $? "octet_base rejects non-numeric quad"
+octet_base "999.1.1.1" >/dev/null 2>&1; assert_rc 1 $? "octet_base rejects out-of-range octet"
+octet_base "192.168.+1.1" >/dev/null 2>&1; assert_rc 1 $? "octet_base rejects octet with a leading +"
 
 # --- find_free_ip -----------------------------------------------------------
 assert_eq "53" "$DNS_IP_FIRST_OCTET" "candidate range starts at .53"

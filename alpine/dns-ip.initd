@@ -16,6 +16,7 @@ DNS_IP_FIRST_OCTET=53
 DNS_IP_LAST_OCTET=59
 DNS_IP_RUNFILE="${DNS_IP_RUNFILE:-/run/dns-ip}"
 DNS_IP_LEASE="${DNS_IP_LEASE:-/run/dns-ip.lease}"
+DNS_IP_LEASE_SCRIPT="${DNS_IP_LEASE_SCRIPT:-/run/dns-ip-lease.script}"
 
 depend() {
     need localmount
@@ -65,12 +66,30 @@ mask_to_prefix() {
 }
 
 # 192.168.1.42 -> 192.168.1
+# Validates that all four components are numeric, contain only digits
+# (no leading '+', no signs, no leading/trailing junk) and are 0-255;
+# a corrupt or hand-edited lease file must not flow straight into
+# `ip addr add`.
 octet_base() {
     case "$1" in
         *.*.*.*.*) return 1 ;;
         *.*.*.*) ;;
         *) return 1 ;;
     esac
+
+    _oifs="$IFS"
+    IFS=.
+    for _octet in $1; do
+        case "$_octet" in
+            ''|*[!0-9]*) IFS="$_oifs"; return 1 ;;
+        esac
+        if [ "$_octet" -gt 255 ]; then
+            IFS="$_oifs"
+            return 1
+        fi
+    done
+    IFS="$_oifs"
+
     printf '%s\n' "${1%.*}"
 }
 
@@ -110,18 +129,31 @@ find_free_ip() {
 # Run udhcpc purely to learn the subnet and gateway, then release.
 # Populates DNS_IP_LEASE with `ip=`, `subnet=`, `router=` lines.
 discover_lease() {
-    cat > /run/dns-ip-lease.script <<'LEASESCRIPT'
+    # The heredoc stays quoted ('LEASESCRIPT') so $1, $ip, $subnet, and
+    # $router - udhcpc's own runtime variables, not this script's - are
+    # written out literally and only expand later, when udhcpc runs the
+    # generated script. The configured lease path is spliced in afterwards
+    # via sed so it can never diverge from $DNS_IP_LEASE, and it stays
+    # inside double quotes in the generated script so a path containing
+    # spaces still works.
+    _lease_body=$(cat <<'LEASESCRIPT'
 #!/bin/sh
 [ "$1" = "bound" ] || exit 0
 {
     echo "ip=$ip"
     echo "subnet=$subnet"
     echo "router=$router"
-} > /run/dns-ip.lease
+} > "__DNS_IP_LEASE_PATH__"
 LEASESCRIPT
-    chmod +x /run/dns-ip-lease.script
+)
+    _lease_path_escaped=$(printf '%s' "$DNS_IP_LEASE" | sed -e 's/[\&|]/\\&/g')
+    printf '%s\n' "$_lease_body" \
+        | sed "s|__DNS_IP_LEASE_PATH__|${_lease_path_escaped}|" \
+        > "$DNS_IP_LEASE_SCRIPT"
+
+    chmod +x "$DNS_IP_LEASE_SCRIPT"
     rm -f "$DNS_IP_LEASE"
-    udhcpc -i "$DNS_IP_IFACE" -n -q -t 5 -s /run/dns-ip-lease.script >/dev/null 2>&1
+    udhcpc -i "$DNS_IP_IFACE" -n -q -t 5 -s "$DNS_IP_LEASE_SCRIPT" >/dev/null 2>&1
 }
 
 start() {
@@ -172,8 +204,27 @@ start() {
         return 1
     fi
 
-    ip addr add "${_claimed}/${_prefix}" dev "$DNS_IP_IFACE"
+    # TOCTOU: arping_free only proved the address was free at probe time.
+    # Another host can claim it in the window between that probe and the
+    # `ip addr add` below. This race cannot be fully closed from userspace;
+    # it is a known, accepted limitation, not an oversight.
+    if ! ip addr add "${_claimed}/${_prefix}" dev "$DNS_IP_IFACE"; then
+        eerror "Failed to bind ${_claimed}/${_prefix} to $DNS_IP_IFACE"
+        eerror "Technitium will not be started."
+        eend 1
+        return 1
+    fi
+
+    # A route failure is only fatal if no default route ends up present at
+    # all; a default route may already legitimately exist, which is why
+    # stderr is suppressed here. We still verify the outcome below so a
+    # genuine problem is never silently hidden.
     ip route add default via "$router" dev "$DNS_IP_IFACE" 2>/dev/null
+    _defroute=$(ip route show default dev "$DNS_IP_IFACE" 2>/dev/null)
+    if [ -z "$_defroute" ]; then
+        ewarn "No default route via $router on $DNS_IP_IFACE after claiming ${_claimed};"
+        ewarn "outbound connectivity may be broken even though the address is bound."
+    fi
 
     printf '%s\n' "$_claimed" > "$DNS_IP_RUNFILE"
     einfo "Claimed ${_claimed}/${_prefix} on $DNS_IP_IFACE"
