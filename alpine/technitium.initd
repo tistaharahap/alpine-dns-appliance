@@ -31,9 +31,48 @@ depend() {
     after firewall
 }
 
+# Validate that $1 is a dotted-quad IPv4 address: four dot-separated numeric
+# components, each 0-255, digits only. Rejects whitespace-only content,
+# leading/trailing whitespace, and embedded newlines (a non-digit anywhere
+# in a component fails the digit test below), since a run file corrupted or
+# hand-edited must not flow straight into a curl URL or a DNS bind address.
+# Mirrors the validation approach in alpine/dns-ip.initd's octet_base(), so
+# the two independent scripts stay consistent for the next reader.
+valid_ipv4() {
+    case "$1" in
+        *.*.*.*.*) return 1 ;;
+        *.*.*.*) ;;
+        *) return 1 ;;
+    esac
+
+    _rest="$1"
+    _o1="${_rest%%.*}"
+    _rest="${_rest#*.}"
+    _o2="${_rest%%.*}"
+    _rest="${_rest#*.}"
+    _o3="${_rest%%.*}"
+    _o4="${_rest#*.}"
+
+    set -- "$_o1" "$_o2" "$_o3" "$_o4"
+    for _octet in "$@"; do
+        case "$_octet" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        if [ "$_octet" -gt 255 ]; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
 # Echo the DNS listen endpoints for a claimed address.
 technitium_endpoints() {
-    [ -n "${1:-}" ] || return 1
+    # Validated even though claimed_ip() below already only ever emits a
+    # vetted address - technitium_endpoints() is a standalone, independently
+    # callable function, and must not build a bind-address string from
+    # anything that isn't a genuine dotted-quad, from any caller.
+    valid_ipv4 "${1:-}" || return 1
     printf '%s:53,127.0.0.1:53\n' "$1"
 }
 
@@ -41,8 +80,25 @@ technitium_endpoints() {
 claimed_ip() {
     [ -s "$DNS_IP_RUNFILE" ] || return 1
     _ip=$(cat "$DNS_IP_RUNFILE")
-    [ -n "$_ip" ] || return 1
+    valid_ipv4 "$_ip" || return 1
     printf '%s\n' "$_ip"
+}
+
+# Extract a top-level "key":"value" string field from a small JSON response
+# file. Not a general JSON parser - only matches the flat shape the
+# Technitium API actually emits. sed/grep only; jq is not available on a
+# minimal Alpine image.
+json_field() {
+    sed -n 's/.*"'"$2"'":"\([^"]*\)".*/\1/p' "$1" 2>/dev/null
+}
+
+# Judge an API response by its body, not by curl's exit code: Technitium
+# returns HTTP 200 with {"status":"error","errorMessage":"..."} for
+# application-level failures (e.g. a stale token), which "curl -fsS" treats
+# as success since the transport itself succeeded.
+api_ok() {
+    [ -f "$1" ] || return 1
+    [ "$(json_field "$1" status)" = "ok" ]
 }
 
 start_pre() {
@@ -68,15 +124,24 @@ start_post() {
 
     _wait=0
     while [ "$_wait" -lt 60 ]; do
-        if curl -fsS "$TECHNITIUM_API/api/user/login?user=admin&pass=${_pass}" \
-            >/run/technitium-login.json 2>/dev/null; then
-            break
-        fi
+        curl -fsS -G "$TECHNITIUM_API/api/user/login" \
+            --data-urlencode "user=admin" \
+            --data-urlencode "pass=${_pass}" \
+            >/run/technitium-login.json 2>/dev/null
+        api_ok /run/technitium-login.json && break
         _wait=$((_wait + 2))
         sleep 2
     done
 
-    _token=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' /run/technitium-login.json 2>/dev/null)
+    if ! api_ok /run/technitium-login.json; then
+        _err=$(json_field /run/technitium-login.json errorMessage)
+        rm -f /run/technitium-login.json
+        ewarn "Could not log in to the Technitium API to set the bind address: ${_err:-no response from server}"
+        ewarn "The server is running; set it manually in the web console."
+        return 0
+    fi
+
+    _token=$(json_field /run/technitium-login.json token)
     rm -f /run/technitium-login.json
     if [ -z "$_token" ]; then
         ewarn "Could not log in to the Technitium API to set the bind address."
@@ -84,12 +149,16 @@ start_post() {
         return 0
     fi
 
-    if curl -fsS -X POST "$TECHNITIUM_API/api/settings/set" \
+    curl -fsS -X POST "$TECHNITIUM_API/api/settings/set" \
         --data-urlencode "token=${_token}" \
         --data-urlencode "dnsServerLocalEndPoints=${_endpoints}" \
-        >/dev/null 2>&1; then
+        >/run/technitium-settings.json 2>/dev/null
+
+    if api_ok /run/technitium-settings.json; then
         einfo "Technitium bound to ${_endpoints}"
     else
-        ewarn "Failed to set dnsServerLocalEndPoints to ${_endpoints}"
+        _err=$(json_field /run/technitium-settings.json errorMessage)
+        ewarn "Failed to set dnsServerLocalEndPoints to ${_endpoints}: ${_err:-no response from server}"
     fi
+    rm -f /run/technitium-settings.json
 }

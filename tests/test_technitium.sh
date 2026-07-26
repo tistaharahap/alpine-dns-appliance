@@ -35,6 +35,25 @@ assert_rc 1 $? "claimed_ip fails when the run file is empty"
 echo "192.168.1.54" > "$DNS_IP_RUNFILE"
 assert_eq "192.168.1.54" "$(claimed_ip)" "claimed_ip reads the run file"
 
+printf ' ' > "$DNS_IP_RUNFILE"
+claimed_ip >/dev/null 2>&1
+assert_rc 1 $? "claimed_ip rejects a whitespace-only run file"
+
+printf '192.168.1.54 \n' > "$DNS_IP_RUNFILE"
+claimed_ip >/dev/null 2>&1
+assert_rc 1 $? "claimed_ip rejects an address with trailing whitespace"
+
+printf '192.168.1.54\nextra\n' > "$DNS_IP_RUNFILE"
+claimed_ip >/dev/null 2>&1
+assert_rc 1 $? "claimed_ip rejects a multi-line run file"
+
+printf '192.168.1.999\n' > "$DNS_IP_RUNFILE"
+claimed_ip >/dev/null 2>&1
+assert_rc 1 $? "claimed_ip rejects an out-of-range octet"
+
+printf '10.0.0.59\n' > "$DNS_IP_RUNFILE"
+assert_eq "10.0.0.59" "$(claimed_ip)" "claimed_ip still accepts a valid address"
+
 # --- interlock and layout ---------------------------------------------------
 _src=$(cat "$(dirname "$0")/../alpine/technitium.initd")
 assert_contains "$_src" "need dns-ip" \
