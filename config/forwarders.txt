@@ -15,13 +15,30 @@
 # Forwarding over DNS-over-HTTPS avoids this entirely: the query is encrypted
 # and travels over 443, so no middlebox can see or rewrite it.
 #
+# WHY THESE ARE IP ADDRESSES AND NOT HOSTNAMES
+#
+# Use IP literals here, not hostnames. Technitium resolves a forwarder's
+# hostname using its OWN resolver - which is configured to forward to the very
+# endpoint it is trying to resolve. That is circular, and it fails closed.
+# Verified against Technitium 15.4 on Alpine:
+#
+#     https://cloudflare-dns.com/dns-query  ->  SERVFAIL
+#     https://1.1.1.1/dns-query             ->  NOERROR, answers returned
+#
+# A working /etc/resolv.conf does NOT rescue the hostname form, because the
+# lookup never goes to the OS resolver.
+#
 # The protocol used for these is set by FORWARDER_PROTOCOL in provision.sh
-# (default Https). If you list plain IP addresses here instead of URLs, change
+# (default Https). If you list plain IP addresses WITHOUT a scheme, change
 # that to Udp - or you will get no resolution at all.
 #
 # To go back to recursive resolution, comment every line out. provision.sh
 # then sends `forwarders=false`, which is how Technitium's API is told to drop
 # its forwarders and resolve independently.
 
-https://cloudflare-dns.com/dns-query
-https://dns.quad9.net/dns-query
+# Cloudflare
+https://1.1.1.1/dns-query
+https://1.0.0.1/dns-query
+
+# Quad9 (filters known-malicious domains)
+https://9.9.9.9/dns-query

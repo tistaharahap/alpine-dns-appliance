@@ -146,8 +146,26 @@ find_free_ip() {
     return 1
 }
 
-# Run udhcpc purely to learn the subnet and gateway, then release.
-# Populates DNS_IP_LEASE with `ip=`, `subnet=`, `router=` lines.
+# Build /etc/resolv.conf from a space-separated list of nameserver addresses.
+#
+# Without this the appliance has no OS-level resolver at all: discover_lease
+# runs udhcpc with a custom script that never touches resolv.conf (unlike
+# Alpine's default script), and then the address is flushed. Anything on the
+# box that resolves a name - apk, curl, and Technitium reaching a DoH endpoint
+# given by hostname - needs this.
+#
+# Entries are validated because a DHCP lease is untrusted input on an unknown
+# LAN, and one malformed nameserver line breaks resolution for everything.
+resolv_conf_contents() {
+    for _ns in $1; do
+        if octet_base "$_ns" >/dev/null 2>&1; then
+            printf 'nameserver %s\n' "$_ns"
+        fi
+    done
+}
+
+# Run udhcpc purely to learn the subnet, gateway, and DNS servers, then
+# release. Populates DNS_IP_LEASE with `ip=`, `subnet=`, `router=`, `dns=`.
 discover_lease() {
     # The heredoc stays quoted ('LEASESCRIPT') so $1, $ip, $subnet, and
     # $router - udhcpc's own runtime variables, not this script's - are
@@ -163,6 +181,7 @@ discover_lease() {
     echo "ip=$ip"
     echo "subnet=$subnet"
     echo "router=$router"
+    echo "dns=$dns"
 } > "__DNS_IP_LEASE_PATH__"
 LEASESCRIPT
 )
@@ -204,6 +223,20 @@ start() {
         ewarn "Could not parse netmask '${subnet:-<empty>}' from the DHCP lease;"
         ewarn "assuming /24. If this LAN is not a /24 the claimed address may be"
         ewarn "unreachable - set the mask correctly on your DHCP server."
+    fi
+
+    # Keep the LAN's resolvers as the OS-level resolver. Technitium serves the
+    # LAN from :53, but the appliance itself still needs to resolve names -
+    # and the address is about to be flushed along with anything udhcpc's
+    # default script would have written.
+    _resolv=$(resolv_conf_contents "${dns:-}")
+    if [ -n "$_resolv" ]; then
+        printf '%s\n' "$_resolv" > /etc/resolv.conf
+        einfo "OS resolver set from the DHCP lease: $(printf '%s' "${dns:-}" | tr ' ' ',')"
+    else
+        ewarn "DHCP lease supplied no usable DNS servers; /etc/resolv.conf left as-is."
+        ewarn "Name resolution on the appliance itself may not work. This does not"
+        ewarn "affect serving DNS to the LAN if forwarders are given as IP addresses."
     fi
 
     if ! _base=$(octet_base "$ip"); then

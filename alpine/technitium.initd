@@ -13,6 +13,24 @@ TECHNITIUM_API="${TECHNITIUM_API:-http://127.0.0.1:5380}"
 DNS_IP_RUNFILE="${DNS_IP_RUNFILE:-/run/dns-ip}"
 TECHNITIUM_CREDS="${TECHNITIUM_CREDS:-/etc/dns-appliance/admin-password}"
 
+# First-start configuration, passed to Technitium as environment variables.
+# Technitium reads these ONLY when config/dns.config does not yet exist; after
+# that its stored config wins, which is why provision.sh also applies the same
+# values through the settings API so re-runs converge.
+#
+# Overridable from /etc/conf.d/technitium, which OpenRC sources before this
+# file - that is how provision.sh injects the forwarders it read from
+# config/forwarders.txt.
+#
+# Bind the web console to IPv4 explicitly. Left to itself Technitium opens a
+# single IPv6 socket (:::5380); whether that also accepts IPv4 depends on
+# net.ipv6.bindv6only and on the kernel having an IPv6 stack at all, so a
+# probe of 127.0.0.1:5380 is not reliably answerable. Verified: with this set,
+# it binds 0.0.0.0:5380 and answers on loopback.
+TECHNITIUM_WEB_ADDRESSES="${TECHNITIUM_WEB_ADDRESSES:-0.0.0.0}"
+TECHNITIUM_FORWARDERS="${TECHNITIUM_FORWARDERS:-}"
+TECHNITIUM_FORWARDER_PROTOCOL="${TECHNITIUM_FORWARDER_PROTOCOL:-Https}"
+
 supervisor="supervise-daemon"
 command="/usr/bin/dotnet"
 command_args="${TECHNITIUM_DIR}/DnsServerApp.dll"
@@ -109,6 +127,16 @@ start_pre() {
     fi
     checkpath --directory --mode 0755 "$TECHNITIUM_DIR/config"
     checkpath --file --mode 0644 "$output_log"
+
+    # Exported here rather than at the top of the file: this script is sourced
+    # by its test suite, which must not be given a polluted environment.
+    # start_pre runs in the same shell that then launches the daemon, so these
+    # reach it.
+    export DNS_SERVER_WEB_SERVICE_LOCAL_ADDRESSES="$TECHNITIUM_WEB_ADDRESSES"
+    if [ -n "$TECHNITIUM_FORWARDERS" ]; then
+        export DNS_SERVER_FORWARDERS="$TECHNITIUM_FORWARDERS"
+        export DNS_SERVER_FORWARDER_PROTOCOL="$TECHNITIUM_FORWARDER_PROTOCOL"
+    fi
 }
 
 start_post() {

@@ -65,4 +65,22 @@ assert_rc 1 $? "returns 1 when .53-.59 are all taken"
 arping_free() { case "$2" in *.59) return 0 ;; *) return 1 ;; esac; }
 assert_eq "192.168.1.59" "$(find_free_ip eth0 192.168.1)" "range is inclusive of .59"
 
+# --- resolv_conf_contents ---------------------------------------------------
+# udhcpc hands us the LAN's DNS servers in $dns. Without writing them out, the
+# appliance's OS has no resolver at all: dns-ip runs udhcpc with a custom lease
+# script that never touches /etc/resolv.conf, then flushes the address.
+assert_eq "nameserver 10.8.8.1" "$(resolv_conf_contents "10.8.8.1")" \
+    "resolv_conf_contents emits a single nameserver"
+assert_eq "nameserver 10.8.8.1
+nameserver 1.1.1.1" "$(resolv_conf_contents "10.8.8.1 1.1.1.1")" \
+    "resolv_conf_contents emits one line per nameserver"
+assert_eq "" "$(resolv_conf_contents "")" \
+    "resolv_conf_contents yields nothing for an empty lease"
+
+# A malformed entry must not reach resolv.conf: the lease is attacker-adjacent
+# input on an untrusted LAN, and a garbage nameserver line breaks resolution
+# for everything on the box.
+assert_eq "nameserver 10.8.8.1" "$(resolv_conf_contents "10.8.8.1 not-an-ip 999.1.1.1")" \
+    "resolv_conf_contents drops entries that are not valid IPv4 addresses"
+
 test_summary "test_dns_ip"

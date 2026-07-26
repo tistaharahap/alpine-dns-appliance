@@ -41,7 +41,17 @@ FORWARDER_PROTOCOL="${FORWARDER_PROTOCOL:-Https}"
 
 # Used only if config/forwarders.txt is missing, e.g. a stick built before
 # that file existed. The file is the real source of truth.
-DEFAULT_FORWARDERS="https://cloudflare-dns.com/dns-query,https://dns.quad9.net/dns-query"
+#
+# IP literals, deliberately. Technitium resolves a forwarder's hostname with
+# its own resolver, which is pointed at the endpoint being resolved - circular,
+# and it fails closed. Verified on Alpine against Technitium 15.4:
+# cloudflare-dns.com -> SERVFAIL, 1.1.1.1 -> NOERROR.
+DEFAULT_FORWARDERS="https://1.1.1.1/dns-query,https://1.0.0.1/dns-query,https://9.9.9.9/dns-query"
+
+# OpenRC sources this before alpine/technitium.initd. Writing the forwarders
+# here means Technitium has them on its FIRST start, which matters because its
+# environment-variable config is only read while config/dns.config is absent.
+TECHNITIUM_CONFD="/etc/conf.d/technitium"
 
 # Overridable so the test suite can feed a fixture instead of the live kernel.
 PROC_MOUNTS="${PROC_MOUNTS:-/proc/mounts}"
@@ -500,6 +510,38 @@ install_services() {
             || die "$_svc was not registered in the default runlevel despite rc-update reporting success"
         info "$_svc installed and added to the default runlevel"
     done
+
+    write_technitium_confd
+}
+
+# Resolve the forwarder list and hand it to the service before its first
+# start. Technitium reads its environment-variable config ONLY while
+# config/dns.config is absent, so this is the one chance to have working
+# upstream resolution on the very first start. configure_technitium() applies
+# the same values through the API afterwards, which is what makes a re-run
+# converge once that window has closed.
+write_technitium_confd() {
+    _fwd_file="$MEDIUM_DIR/provision/config/forwarders.txt"
+    if [ -f "$_fwd_file" ]; then
+        FORWARDERS=$(forwarder_urls "$_fwd_file")
+    else
+        FORWARDERS="$DEFAULT_FORWARDERS"
+        warn "$_fwd_file not found; using built-in default forwarders"
+    fi
+
+    {
+        printf '# Written by provision.sh. Sourced by OpenRC before technitium.initd.\n'
+        printf 'TECHNITIUM_WEB_ADDRESSES="0.0.0.0"\n'
+        printf 'TECHNITIUM_FORWARDERS="%s"\n' "$FORWARDERS"
+        printf 'TECHNITIUM_FORWARDER_PROTOCOL="%s"\n' "$FORWARDER_PROTOCOL"
+    } > "$TECHNITIUM_CONFD"
+
+    if [ -n "$FORWARDERS" ]; then
+        info "first-start forwarders ($FORWARDER_PROTOCOL): $FORWARDERS"
+    else
+        info "no forwarders configured - Technitium will resolve recursively"
+    fi
+    info "web console will bind 0.0.0.0:5380 (IPv4)"
 }
 
 start_services() {
@@ -593,17 +635,17 @@ configure_technitium() {
     #
     # An empty list is NOT the same as no forwarders: the API needs the
     # literal string "false" to drop existing ones and go back to recursion.
-    _fwd_file="$MEDIUM_DIR/provision/config/forwarders.txt"
-    if [ -f "$_fwd_file" ]; then
-        _forwarders=$(forwarder_urls "$_fwd_file")
-    else
-        _forwarders="$DEFAULT_FORWARDERS"
-        warn "$_fwd_file not found; using built-in default forwarders"
-    fi
-    if [ -z "$_forwarders" ]; then
+    # FORWARDERS was resolved by write_technitium_confd() before the service
+    # first started. Re-applying it here is what makes a re-run converge: the
+    # environment-variable path is dead once config/dns.config exists.
+    #
+    # An empty list is NOT the same as no forwarders: the API needs the
+    # literal string "false" to drop existing ones and go back to recursion.
+    if [ -z "${FORWARDERS:-}" ]; then
         _forwarders="false"
         info "no forwarders configured - Technitium will resolve recursively"
     else
+        _forwarders="$FORWARDERS"
         info "forwarding over $FORWARDER_PROTOCOL to $_forwarders"
     fi
 
@@ -614,6 +656,7 @@ configure_technitium() {
         --data-urlencode "blockListUrls=$_lists" \
         --data-urlencode "blockListUrlUpdateIntervalHours=24" \
         --data-urlencode "dnsServerLocalEndPoints=$_endpoints" \
+        --data-urlencode "webServiceLocalAddresses=0.0.0.0" \
         --data-urlencode "forwarders=$_forwarders" \
         --data-urlencode "forwarderProtocol=$FORWARDER_PROTOCOL" \
         --data-urlencode "concurrentForwarding=true" \
