@@ -331,6 +331,17 @@ Expected: FAIL — `alpine/dns-ip.initd: No such file or directory`
 
 - [ ] **Step 3: Implement the service**
 
+> **Amended during implementation.** Review found four defects in the code
+> below, all since fixed in the committed file — consult
+> `alpine/dns-ip.initd` in the repo, not this listing, if you need the
+> current version. The defects were: `start()` wrote the run file and
+> returned success even when `ip addr add` failed; `discover_lease`'s quoted
+> heredoc hardcoded the lease path while everything else honoured
+> `$DNS_IP_LEASE`; `octet_base` accepted non-numeric and out-of-range
+> octets; and both `octet_base` and `mask_to_prefix` accepted a trailing
+> empty component (`192.168.1.`) because POSIX word-splitting drops the
+> trailing empty field.
+
 Create `alpine/dns-ip.initd`:
 
 ```sh
