@@ -9,6 +9,11 @@ export ADS_SOURCE_ONLY
 . "$(dirname "$0")/../provision.sh"
 
 _tmp=$(mktemp -d)
+# Normalize physically up front: boot_medium_dir now resolves with pwd -P
+# (Finding 5), and on macOS $TMPDIR itself is reached through a symlink
+# (/tmp -> /private/tmp). Without this, every boot_medium_dir assertion
+# below would compare a physical path against a symlinked one.
+_tmp=$(cd "$_tmp" && pwd -P)
 trap 'rm -rf "$_tmp"' EXIT
 
 # --- pinned constants -------------------------------------------------------
@@ -56,6 +61,21 @@ assert_eq "$_tmp/media/sda1" "$(boot_medium_dir "$_tmp/media/sda1/provision/prov
 assert_eq "sda1" "$(lbu_media_name "$_tmp/media/sda1")" "lbu_media_name takes the basename"
 boot_medium_dir "$_tmp/nope/provision/provision.sh" >/dev/null 2>&1
 assert_rc 1 $? "boot_medium_dir fails when the path does not exist"
+
+# A symlinked mount point must resolve to the real device directory, not the
+# symlink's own name - that name is what gets passed to setup-lbu.
+mkdir -p "$_tmp/real/sdb1/provision"
+: > "$_tmp/real/sdb1/provision/provision.sh"
+ln -s "$_tmp/real/sdb1" "$_tmp/media/symlinked-mount"
+assert_eq "$_tmp/real/sdb1" \
+    "$(boot_medium_dir "$_tmp/media/symlinked-mount/provision/provision.sh")" \
+    "boot_medium_dir resolves physically through a symlinked mount point"
+assert_eq "sdb1" \
+    "$(lbu_media_name "$(boot_medium_dir "$_tmp/media/symlinked-mount/provision/provision.sh")")" \
+    "lbu_media_name yields the real device name, not the symlink's name"
+
+assert_eq "sda1" "$(lbu_media_name "$_tmp/media/sda1/")" \
+    "lbu_media_name strips a trailing slash before taking the basename"
 
 # --- random_password --------------------------------------------------------
 _pw=$(random_password)

@@ -20,6 +20,11 @@ TECHNITIUM_URL="https://download.technitium.com/dns/DnsServerPortable.tar.gz"
 TECHNITIUM_API="http://127.0.0.1:5380"
 CREDS_DIR="/etc/dns-appliance"
 CREDS_FILE="$CREDS_DIR/admin-password"
+# A password rotation writes here FIRST, before it is ever sent to the
+# server. If the script dies between the API call succeeding and the
+# credentials file being updated, this pending file is what makes the new
+# password recoverable on the next run instead of lost forever.
+CREDS_PENDING="$CREDS_FILE.new"
 BLOCKLIST_MAX_URL_LEN=255
 
 # Alpine's musl-native .NET. Microsoft's glibc build will not run here.
@@ -60,14 +65,21 @@ blocklist_urls() {
 }
 
 # /media/sda1/provision/provision.sh -> /media/sda1
+# Resolves physically (pwd -P): if the mount point is reached through a
+# symlink, "pwd" alone would yield the symlink's own name rather than the
+# real device directory, and that name is what gets passed to setup-lbu.
 boot_medium_dir() {
-    _dir=$(cd "$(dirname "$1")/.." 2>/dev/null && pwd) || return 1
+    _dir=$(cd "$(dirname "$1")/.." 2>/dev/null && pwd -P) || return 1
     printf '%s\n' "$_dir"
 }
 
-# /media/sda1 -> sda1
+# /media/sda1 -> sda1, /media/sda1/ -> sda1
 lbu_media_name() {
-    printf '%s\n' "${1##*/}"
+    _dir="$1"
+    while [ "${_dir%/}" != "$_dir" ]; do
+        _dir="${_dir%/}"
+    done
+    printf '%s\n' "${_dir##*/}"
 }
 
 random_password() {
@@ -214,7 +226,13 @@ install_services() {
     for _svc in dns-ip technitium; do
         cp "$_src/${_svc}.initd" "/etc/init.d/$_svc" || die "could not install $_svc"
         chmod +x "/etc/init.d/$_svc"
-        rc-update add "$_svc" default >/dev/null 2>&1
+        rc-update add "$_svc" default >/dev/null 2>&1 \
+            || die "rc-update add $_svc default failed - it will not autostart on reboot"
+        # rc-update's exit code alone is not proof: verify the runlevel
+        # symlink actually landed, so a failure here is caught tonight
+        # instead of discovered after the next reboot.
+        [ -e "/etc/runlevels/default/$_svc" ] \
+            || die "$_svc was not registered in the default runlevel despite rc-update reporting success"
         info "$_svc installed and added to the default runlevel"
     done
 }
@@ -233,32 +251,63 @@ above: either DHCP discovery failed, or all of .53-.59 are already taken."
 
     rc-service technitium restart || die "technitium failed to start - see /var/log/technitium.log"
 
+    # Probe for the HTTP server answering at all, independent of whether
+    # credentials are already stored - a stored-credentials check here would
+    # make this loop a no-op on every re-run, and the old probe additionally
+    # sent "pass=admin" unencoded in a URL query string, which is exactly the
+    # pattern eliminated everywhere else in this file. No credentials are
+    # sent at all: any response from the web root proves Kestrel is up.
     _wait=0
+    _api_up=0
     while [ "$_wait" -lt 90 ]; do
-        if curl -fsS "$TECHNITIUM_API/api/user/login?user=admin&pass=admin" >/dev/null 2>&1 \
-           || [ -s "$CREDS_FILE" ]; then
+        if curl -fsS -o /dev/null "$TECHNITIUM_API/" 2>/dev/null; then
+            _api_up=1
             break
         fi
         _wait=$((_wait + 3))
         sleep 3
     done
-    info "Technitium API is responding"
+
+    if [ "$_api_up" -eq 1 ]; then
+        info "Technitium API is responding"
+    else
+        warn "Technitium API did not respond within 90s; continuing anyway - the login attempt next may fail"
+    fi
 }
 
 configure_technitium() {
     log "Configuring Technitium"
 
-    # On a re-run the password has already been rotated, so try the stored one
-    # first and fall back to the factory default.
-    _pass="admin"
-    [ -s "$CREDS_FILE" ] && _pass=$(cat "$CREDS_FILE")
+    # Which password actually authenticates - not whether a creds file
+    # happens to exist - is what decides whether a rotation is needed below.
+    # A stale creds file from a reused stick must not be trusted blindly: if
+    # it doesn't work but the factory default does, the server really is on
+    # admin/admin and must be rotated regardless of what's on disk.
+    #
+    # A pending file (see CREDS_PENDING) is also tried: it means a previous
+    # run's changePassword call reached the server but the script died
+    # before promoting it to CREDS_FILE, so the "old" stored/factory
+    # password no longer works but the pending one does.
+    _stored_pass=""
+    [ -s "$CREDS_FILE" ] && _stored_pass=$(cat "$CREDS_FILE")
 
-    if ! _token=$(api_token "$_pass"); then
-        if [ "$_pass" != "admin" ] && _token=$(api_token "admin"); then
-            warn "stored password did not work; the factory default did"
-        else
-            die "could not log in to the Technitium API - see /var/log/technitium.log"
-        fi
+    _pending_pass=""
+    [ -s "$CREDS_PENDING" ] && _pending_pass=$(cat "$CREDS_PENDING")
+
+    _authed_pass=""
+    if [ -n "$_stored_pass" ] && _token=$(api_token "$_stored_pass"); then
+        _authed_pass="$_stored_pass"
+    elif [ -n "$_pending_pass" ] && _token=$(api_token "$_pending_pass"); then
+        _authed_pass="$_pending_pass"
+        mv "$CREDS_PENDING" "$CREDS_FILE" \
+            || die "authenticated with the pending password but could not promote $CREDS_PENDING to $CREDS_FILE - recover the password from that file manually"
+        chmod 0600 "$CREDS_FILE"
+        warn "recovered an interrupted password rotation from $CREDS_PENDING"
+    elif _token=$(api_token "admin"); then
+        _authed_pass="admin"
+        [ -n "$_stored_pass" ] && warn "stored password did not work; the factory default did"
+    else
+        die "could not log in to the Technitium API with the stored password, a pending rotation, or the factory default - see /var/log/technitium.log"
     fi
 
     _lists=$(blocklist_urls "$MEDIUM_DIR/provision/config/blocklists.txt")
@@ -295,10 +344,25 @@ configure_technitium() {
     fi
     rm -f "$_refresh_resp"
 
-    # Rotate the factory password exactly once. The file's presence makes this
-    # a no-op on re-runs.
-    if [ ! -s "$CREDS_FILE" ]; then
+    # Rotate whenever the password that actually authenticated was the
+    # factory default - not merely when CREDS_FILE is empty (see above).
+    # This block is what report() below reflects via ADMIN_PASSWORD, so
+    # every exit path must set ADMIN_PASSWORD/ADMIN_PASSWORD_NOTE to
+    # something that matches what actually happened on the server.
+    if [ "$_authed_pass" = "admin" ]; then
         _new=$(random_password)
+
+        # Persist the candidate password BEFORE it is ever sent to the
+        # server. This is the crash-safety invariant: once this write
+        # succeeds, the new password is durably recoverable from disk no
+        # matter what happens next - including set -eu killing the script
+        # the instant after the API call below succeeds.
+        rm -f "$CREDS_PENDING"
+        if ! ( umask 077 && printf '%s\n' "$_new" > "$CREDS_PENDING" ); then
+            die "could not persist the pending password to $CREDS_PENDING - refusing to rotate; the server is still on admin/admin"
+        fi
+        chmod 0600 "$CREDS_PENDING"
+
         _changepw_resp="/tmp/technitium-changepw.json"
         curl -fsS -X POST "$TECHNITIUM_API/api/user/changePassword" \
             --data-urlencode "token=$_token" \
@@ -307,17 +371,34 @@ configure_technitium() {
 
         if api_ok "$_changepw_resp"; then
             rm -f "$_changepw_resp"
-            printf '%s\n' "$_new" > "$CREDS_FILE"
-            chmod 0600 "$CREDS_FILE"
-            info "admin password rotated and stored at $CREDS_FILE"
+            # Verify by actually authenticating with the new password rather
+            # than trusting the API's "status":"ok" alone.
+            if api_token "$_new" >/dev/null; then
+                mv "$CREDS_PENDING" "$CREDS_FILE" \
+                    || die "the new password authenticates but could not be promoted from $CREDS_PENDING to $CREDS_FILE - recover it from that file manually"
+                chmod 0600 "$CREDS_FILE"
+                ADMIN_PASSWORD="$_new"
+                ADMIN_PASSWORD_NOTE="rotated and stored at $CREDS_FILE"
+                info "admin password rotated, verified, and stored at $CREDS_FILE"
+            else
+                ADMIN_PASSWORD="(unknown - see $CREDS_PENDING)"
+                ADMIN_PASSWORD_NOTE="changePassword reported success but the new password did not authenticate; recover it from $CREDS_PENDING immediately"
+                warn "changePassword reported success but the new password did not authenticate"
+                warn "the new password is saved at $CREDS_PENDING - recover it manually; do not delete this file"
+            fi
         else
             _err=$(json_field "$_changepw_resp" errorMessage)
             rm -f "$_changepw_resp"
+            rm -f "$CREDS_PENDING"
+            ADMIN_PASSWORD="admin"
+            ADMIN_PASSWORD_NOTE="rotation failed (${_err:-no response from server}) - still admin/admin, change it in the web console immediately"
             warn "could not rotate the admin password (${_err:-no response from server}) - it is still admin/admin!"
             warn "change it in the web console immediately."
         fi
     else
-        info "admin password already rotated; leaving it alone"
+        ADMIN_PASSWORD="$_authed_pass"
+        ADMIN_PASSWORD_NOTE="stored at $CREDS_FILE"
+        info "stored password already authenticates; leaving it alone"
     fi
 }
 
@@ -334,8 +415,11 @@ persist() {
 }
 
 report() {
-    _pw="(unchanged - still admin/admin, change it now)"
-    [ -s "$CREDS_FILE" ] && _pw=$(cat "$CREDS_FILE")
+    # ADMIN_PASSWORD/ADMIN_PASSWORD_NOTE are set by configure_technitium to
+    # reflect what actually happened this run - never re-derived from
+    # CREDS_FILE here, since a stale file (e.g. a failed rotation that left
+    # the server on admin/admin) would make this report claim a rotation
+    # that did not happen.
 
     cat <<REPORT
 
@@ -346,8 +430,8 @@ report() {
   DNS server      ${CLAIMED_IP}:53
   Web console     http://${CLAIMED_IP}:5380
   Admin user      admin
-  Admin password  ${_pw}
-                  (also stored at ${CREDS_FILE}, mode 0600)
+  Admin password  ${ADMIN_PASSWORD}
+                  (${ADMIN_PASSWORD_NOTE})
 
   Verify it works:
 
