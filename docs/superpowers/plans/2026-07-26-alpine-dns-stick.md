@@ -172,7 +172,7 @@ test_summary() {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `sh tests/test_harness.sh`
-Expected: PASS. Output shows one intentional `FAIL` line for the expected-to-fail assertion, then `ok   a failing assert_eq increments ADS_TESTS_FAILED`, then `-- test_harness: 5 assertions, 0 failed`. Exit code 0 — confirm with `echo $?`.
+Expected: PASS. The intentional failure runs inside a silenced subshell, so no `FAIL` line appears. Output ends with `ok   a failing assert_eq increments ADS_TESTS_FAILED` and `-- test_harness: 5 assertions, 0 failed`. Exit code 0 — confirm with `echo $?`.
 
 - [ ] **Step 5: Write the suite runner**
 
