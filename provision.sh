@@ -86,6 +86,46 @@ random_password() {
     LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24
 }
 
+# Validate that $1 is a dotted-quad IPv4 address: four dot-separated numeric
+# components, each 0-255, digits only. Rejects whitespace-only content,
+# leading/trailing whitespace, and embedded newlines, since a run file
+# corrupted or hand-edited must not flow straight into a curl URL or a DNS
+# bind address. Mirrors alpine/technitium.initd's valid_ipv4(), so the two
+# independent scripts stay consistent for the next reader.
+valid_ipv4() {
+    case "$1" in
+        *.*.*.*.*) return 1 ;;
+        *.*.*.*) ;;
+        *) return 1 ;;
+    esac
+
+    _rest="$1"
+    _o1="${_rest%%.*}"
+    _rest="${_rest#*.}"
+    _o2="${_rest%%.*}"
+    _rest="${_rest#*.}"
+    _o3="${_rest%%.*}"
+    _o4="${_rest#*.}"
+
+    set -- "$_o1" "$_o2" "$_o3" "$_o4"
+    for _octet in "$@"; do
+        case "$_octet" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        if [ "$_octet" -gt 255 ]; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+# Strip a leading slash so a path matches the format lbu's include list uses
+# in /etc/apk/protected_paths.d/lbu.list ("+opt", not "+/opt").
+lbu_list_entry() {
+    printf '%s\n' "${1#/}"
+}
+
 # Extract a top-level "key":"value" string field from a small JSON response
 # file. Not a general JSON parser - only matches the flat shape the
 # Technitium API actually emits. sed/grep only; jq is not available on a
@@ -185,6 +225,15 @@ IFACES
 
 install_packages() {
     log "Installing packages"
+    # This relies on a DHCP lease already being live on eth0 - nothing in
+    # this repo brings the interface up. It works because Alpine's
+    # live/diskless boot image ships a factory-default
+    # /etc/network/interfaces with "auto eth0" / "iface eth0 inet dhcp", so
+    # eth0 already has an address by the time an operator reaches this
+    # point. setup_base() above already overwrote that file with a
+    # loopback-only version, but the interface it replaced stays up and
+    # keeps its lease for the rest of this run; only a subsequent reboot
+    # picks up the new file, by which point dns-ip owns eth0 instead.
     apk update >/dev/null 2>&1 || die "apk update failed - is the network up?"
     # shellcheck disable=SC2086  # word splitting of the package list is intended
     apk add $APK_PACKAGES || die "apk add failed
@@ -281,6 +330,13 @@ above: either DHCP discovery failed, or all of .53-.59 are already taken."
 
     [ -s /run/dns-ip ] || die "dns-ip reported success but /run/dns-ip is empty"
     CLAIMED_IP=$(cat /run/dns-ip)
+    # dns-ip just restarted moments ago above, so this is expected to always
+    # hold - but /run/dns-ip is a plain file, and alpine/technitium.initd's
+    # claimed_ip() validates the very same file before trusting it. Do the
+    # same here rather than passing it straight into curl URLs and the DNS
+    # bind address unchecked.
+    valid_ipv4 "$CLAIMED_IP" \
+        || die "/run/dns-ip does not contain a valid IPv4 address (got '$CLAIMED_IP') - dns-ip reported success but wrote something unexpected"
     info "claimed $CLAIMED_IP"
 
     rc-service technitium restart || die "technitium failed to start - see /var/log/technitium.log"
@@ -440,8 +496,42 @@ persist() {
     log "Persisting configuration with lbu"
     # /opt is NOT in lbu's default include list. Without this, Technitium
     # disappears on the next reboot.
-    lbu add /opt >/dev/null 2>&1 || warn "lbu add /opt reported a problem"
-    lbu add "$CREDS_DIR" >/dev/null 2>&1 || warn "lbu add $CREDS_DIR reported a problem"
+    #
+    # Unlike setup-apkrepos/setup-apkcache/setup-lbu above (reasonably left
+    # as warnings: a genuine failure there surfaces downstream when lbu
+    # commit fails, which is already fatal), a failed lbu add here has no
+    # such catch. lbu commit only packages whatever is in the include list;
+    # it succeeds regardless of whether these two adds landed in it. Without
+    # this being fatal, a failed lbu add produces an appliance that
+    # provisions "successfully", reports success, and comes up without
+    # Technitium after the next reboot - so it must die here, not warn.
+    lbu add /opt >/dev/null 2>&1 \
+        || die "lbu add /opt failed - Technitium will NOT survive a reboot; re-run provision.sh"
+    lbu add "$CREDS_DIR" >/dev/null 2>&1 \
+        || die "lbu add $CREDS_DIR failed - the admin password will NOT survive a reboot; re-run provision.sh"
+
+    # lbu add exiting 0 is not proof either - the same "reported success"
+    # gap this whole fix closes. Verify against lbu's own persisted include
+    # list (/etc/apk/protected_paths.d/lbu.list, where `lbu add` records
+    # "+opt" and "+etc/dns-appliance") rather than trusting the
+    # add-then-commit sequence blindly, the same way install_services()
+    # above double-checks rc-update's exit code against the runlevel
+    # symlink it's supposed to have created.
+    #
+    # This check runs before `lbu commit -d`, not after: the include list is
+    # what commit reads to decide what to package, and commit does not
+    # modify it, so a path missing from the list now will still be missing
+    # from it after a successful commit. Re-parsing the committed apkovl
+    # itself to double-check would add real fragility (its filename is
+    # dynamic, derived from hostname/mount point, and undocumented here) for
+    # no additional coverage over checking the include list directly.
+    _lbu_include_list="/etc/apk/protected_paths.d/lbu.list"
+    _opt_entry=$(lbu_list_entry "/opt")
+    _creds_entry=$(lbu_list_entry "$CREDS_DIR")
+    grep -qxF "+$_opt_entry" "$_lbu_include_list" 2>/dev/null \
+        || die "lbu add /opt reported success but +$_opt_entry is not in $_lbu_include_list - Technitium will NOT survive a reboot"
+    grep -qxF "+$_creds_entry" "$_lbu_include_list" 2>/dev/null \
+        || die "lbu add $CREDS_DIR reported success but +$_creds_entry is not in $_lbu_include_list - the admin password will NOT survive a reboot"
     info "tracking /opt and $CREDS_DIR"
 
     lbu commit -d || die "lbu commit failed - the configuration will NOT survive a reboot"

@@ -162,6 +162,15 @@ idempotent: if it fails partway through (a flaky network fetching a
 package, for instance), simply run it again — every step is written to
 converge rather than to double-apply.
 
+This relies on eth0 already having a DHCP lease when you run it — nothing in
+this repo brings the interface up before that point. Alpine's live boot
+image ships with `auto eth0` / `iface eth0 inet dhcp` in
+`/etc/network/interfaces` by default, so that lease is already in place from
+boot. `provision.sh` overwrites that file with a loopback-only one early on,
+but the running lease survives for the rest of this run; only the *next*
+reboot uses the new file, by which point the `dns-ip` service owns eth0
+instead.
+
 When it finishes, it prints a report with the claimed IP address, the
 Technitium web console URL, and the admin password currently in effect —
 freshly generated on a first run, or the previously stored one on a re-run

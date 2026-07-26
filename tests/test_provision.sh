@@ -88,4 +88,28 @@ _pw_a=$(random_password)
 _pw_b=$(random_password)
 assert_not_contains "$_pw_a" "$_pw_b" "random_password output varies between calls"
 
+# --- valid_ipv4 --------------------------------------------------------------
+valid_ipv4 "192.168.1.54" >/dev/null 2>&1
+assert_rc 0 $? "valid_ipv4 accepts a normal address"
+valid_ipv4 "10.0.0.59" >/dev/null 2>&1
+assert_rc 0 $? "valid_ipv4 accepts another normal address"
+valid_ipv4 "192.168.1.999" >/dev/null 2>&1
+assert_rc 1 $? "valid_ipv4 rejects an out-of-range octet"
+valid_ipv4 "192.168.1" >/dev/null 2>&1
+assert_rc 1 $? "valid_ipv4 rejects too few components"
+valid_ipv4 "192.168.1.1.1" >/dev/null 2>&1
+assert_rc 1 $? "valid_ipv4 rejects too many components"
+valid_ipv4 "" >/dev/null 2>&1
+assert_rc 1 $? "valid_ipv4 rejects an empty string"
+valid_ipv4 "192.168.1.abc" >/dev/null 2>&1
+assert_rc 1 $? "valid_ipv4 rejects a non-numeric octet"
+valid_ipv4 "192.168.1.54 " >/dev/null 2>&1
+assert_rc 1 $? "valid_ipv4 rejects an address with trailing whitespace"
+
+# --- lbu_list_entry ----------------------------------------------------------
+assert_eq "opt" "$(lbu_list_entry "/opt")" \
+    "lbu_list_entry strips the leading slash from /opt"
+assert_eq "etc/dns-appliance" "$(lbu_list_entry "$CREDS_DIR")" \
+    "lbu_list_entry matches CREDS_DIR for the lbu include-list check"
+
 test_summary "test_provision"
