@@ -107,6 +107,36 @@ assert_rc 1 $? "medium_is_ro returns false for an rw medium"
 medium_is_ro /media/tricky
 assert_rc 1 $? "medium_is_ro is not fooled by errors=remount-ro on an rw mount"
 
+# --- parse_link_names -------------------------------------------------------
+# Alpine's live ISO leaves every interface down, so provision.sh has to bring
+# one up itself before apk can reach a mirror. This parses `ip -o link show`
+# to report what the machine actually has, which is what makes the error
+# actionable when eth0 is not the name in use.
+assert_eq "eth0" "$(parse_link_names <<'LINKS'
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP mode DEFAULT group default qlen 1000
+LINKS
+)" "parse_link_names returns the non-loopback interface"
+
+assert_eq "enp3s0
+wlan0" "$(parse_link_names <<'LINKS'
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT
+2: enp3s0: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN mode DEFAULT
+3: wlan0: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN mode DEFAULT
+LINKS
+)" "parse_link_names lists every non-loopback interface, one per line"
+
+assert_eq "" "$(parse_link_names <<'LINKS'
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT
+LINKS
+)" "parse_link_names yields nothing when only loopback exists"
+
+# An @-suffixed name (VLAN, veth peer) must lose the peer part.
+assert_eq "eth0" "$(parse_link_names <<'LINKS'
+2: eth0@if7: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state UP mode DEFAULT
+LINKS
+)" "parse_link_names strips an @peer suffix from the interface name"
+
 # --- random_password --------------------------------------------------------
 _pw=$(random_password)
 assert_eq "24" "$(printf '%s' "$_pw" | wc -c | tr -d ' ')" "random_password is 24 characters"

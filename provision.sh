@@ -27,6 +27,11 @@ CREDS_FILE="$CREDS_DIR/admin-password"
 CREDS_PENDING="$CREDS_FILE.new"
 BLOCKLIST_MAX_URL_LEN=255
 
+# The interface provisioning brings up temporarily to reach the package
+# mirrors. Must match DNS_IP_IFACE in alpine/dns-ip.initd, which owns this
+# interface once the appliance is running.
+PROVISION_IFACE="${PROVISION_IFACE:-eth0}"
+
 # Overridable so the test suite can feed a fixture instead of the live kernel.
 PROC_MOUNTS="${PROC_MOUNTS:-/proc/mounts}"
 
@@ -91,6 +96,20 @@ lbu_media_name() {
 
 random_password() {
     LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24
+}
+
+# Echo every non-loopback interface name from `ip -o link show` on stdin, one
+# per line. Names may carry an @peer suffix (VLANs, veth) which is not part of
+# the interface name.
+parse_link_names() {
+    while IFS= read -r _line; do
+        _name="${_line#*: }"
+        _name="${_name%%:*}"
+        _name="${_name%%@*}"
+        [ -n "$_name" ] || continue
+        [ "$_name" = "lo" ] && continue
+        printf '%s\n' "$_name"
+    done
 }
 
 # Echo the filesystem type mounted at $1, or return 1 if nothing is mounted
@@ -269,6 +288,49 @@ restore_medium_ro() {
     fi
 }
 
+# Bring up a temporary DHCP lease so apk can reach a mirror.
+#
+# Alpine's standard ISO boots with every interface down - it expects you to
+# run setup-alpine or ifup by hand - so nothing here has a network until we
+# make one. This has to happen before setup-apkrepos and apk, and it is
+# deliberately NOT written into /etc/network/interfaces: the lease lives only
+# for this run, and on the next boot dns-ip owns the interface instead.
+setup_network() {
+    log "Bringing up the network for provisioning"
+
+    if ! ip link show "$PROVISION_IFACE" >/dev/null 2>&1; then
+        _found=$(ip -o link show 2>/dev/null | parse_link_names | tr '\n' ' ')
+        die "no interface named $PROVISION_IFACE on this machine.
+
+Interfaces present: ${_found:-<none>}
+
+The appliance's dns-ip service is written against $PROVISION_IFACE. If your
+NIC enumerates under a different name, that name has to be set in both
+alpine/dns-ip.initd (DNS_IP_IFACE) and this script (PROVISION_IFACE) before
+the appliance will work."
+    fi
+
+    ip link set "$PROVISION_IFACE" up 2>/dev/null
+
+    if ip route show default 2>/dev/null | grep -q .; then
+        info "$PROVISION_IFACE already has a default route; leaving it alone"
+        return 0
+    fi
+
+    info "requesting a DHCP lease on $PROVISION_IFACE (temporary, for provisioning only)"
+    if ! udhcpc -i "$PROVISION_IFACE" -q -n -t 5 >/dev/null 2>&1; then
+        die "DHCP failed on $PROVISION_IFACE - provisioning needs internet access.
+
+apk has to download the .NET runtime and Technitium from the network; the
+packages on the stick are only enough to boot Alpine. Check the cable, the
+switch, and that a DHCP server is reachable, then run this script again."
+    fi
+
+    _addr=$(ip -4 -o addr show "$PROVISION_IFACE" 2>/dev/null | awk '{print $4}' | head -1)
+    [ -n "$_addr" ] || die "udhcpc reported success but $PROVISION_IFACE has no address"
+    info "leased $_addr"
+}
+
 setup_base() {
     log "Configuring the base system"
 
@@ -288,7 +350,26 @@ iface lo inet loopback
 IFACES
     info "eth0 left to the dns-ip service"
 
-    setup-apkrepos -c -1 >/dev/null 2>&1 || warn "setup-apkrepos reported a problem; continuing"
+    # Fatal, not a warning. Without a mirror, /etc/apk/repositories holds only
+    # the stick's local /media/usb/apks - enough to boot Alpine and nothing
+    # else - and every apk add later fails with a baffling "no such package"
+    # for staples like curl. Failing here says what actually went wrong.
+    setup-apkrepos -c -1 >/dev/null 2>&1 \
+        || die "setup-apkrepos failed - could not add an Alpine mirror.
+
+Without it, apk only has the stick's local package set, which cannot supply
+the .NET runtime. This usually means no internet access or no DNS. Check:
+
+    ip -4 addr show $PROVISION_IFACE
+    ip route show default
+    cat /etc/resolv.conf
+    ping -c1 dl-cdn.alpinelinux.org"
+
+    grep -q '^[^#]*alpinelinux\|^[^#]*http' /etc/apk/repositories 2>/dev/null \
+        || die "setup-apkrepos reported success but /etc/apk/repositories has no
+network mirror - only the stick's local packages. Contents:
+
+$(cat /etc/apk/repositories 2>/dev/null)"
     info "community repository enabled"
 
     mkdir -p "$MEDIUM_DIR/cache"
@@ -301,22 +382,24 @@ IFACES
 
 install_packages() {
     log "Installing packages"
-    # This relies on a DHCP lease already being live on eth0 - nothing in
-    # this repo brings the interface up. It works because Alpine's
-    # live/diskless boot image ships a factory-default
-    # /etc/network/interfaces with "auto eth0" / "iface eth0 inet dhcp", so
-    # eth0 already has an address by the time an operator reaches this
-    # point. setup_base() above already overwrote that file with a
-    # loopback-only version, but the interface it replaced stays up and
-    # keeps its lease for the rest of this run; only a subsequent reboot
-    # picks up the new file, by which point dns-ip owns eth0 instead.
-    apk update >/dev/null 2>&1 || die "apk update failed - is the network up?"
+    # The lease setup_network() took out is what makes this work. Alpine's
+    # standard ISO boots with every interface down, so without that step
+    # /etc/apk/repositories holds only the stick's local package set and every
+    # name below fails as "no such package" - including staples like curl.
+    apk update >/dev/null 2>&1 || die "apk update failed - could not reach the package mirror.
+
+The network was up a moment ago (setup_network leased an address), so this is
+most likely DNS or a blocked outbound connection rather than a dead link."
     # shellcheck disable=SC2086  # word splitting of the package list is intended
     apk add $APK_PACKAGES || die "apk add failed
 
-If it failed on iputils-arping=20250605-r2, the pinned version is no longer in
-the repository. Do NOT simply drop the pin: dns-ip.initd depends on arping -D
-exiting 0 for a free address. Verify that semantics against the new version
+If EVERY package was reported as 'no such package' - including curl - then the
+problem is the repositories, not the packages: apk has no working mirror. Check
+/etc/apk/repositories for an http(s) line alongside the local $MEDIUM_DIR/apks.
+
+If ONLY iputils-arping=20250605-r2 failed, the pinned version has left the
+repository. Do NOT simply drop the pin: dns-ip.initd depends on arping -D
+exiting 0 for a free address. Verify those semantics against the new version
 first (see README.md, 'arping variants')."
     info "installed: $APK_PACKAGES"
 }
@@ -658,6 +741,7 @@ main() {
     trap restore_medium_ro EXIT INT TERM
     require_root
     locate_medium
+    setup_network
     setup_base
     install_packages
     install_technitium

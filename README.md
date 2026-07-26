@@ -238,6 +238,42 @@ or for noticing you forgot to make a change stick before it's too late.
 
 ## Troubleshooting
 
+### "no such package" for everything, including curl
+
+If `apk add` reports *every* package as missing — `curl` included, which lives
+in Alpine's main repository and is always available — the problem is not the
+packages. It means `/etc/apk/repositories` has no network mirror, only the
+stick's local `/media/usb/apks`, which carries just enough to boot Alpine.
+
+`provision.sh` now fails earlier and more clearly than this, at
+`setup-apkrepos`. If you see it anyway, check connectivity in this order:
+
+```
+ip -4 addr show eth0        # should have a leased address
+ip route show default       # should have a gateway
+cat /etc/resolv.conf        # should have a nameserver
+ping -c1 dl-cdn.alpinelinux.org
+```
+
+### Provisioning needs internet; the appliance afterwards does not
+
+Alpine's standard ISO boots with **every network interface down**. Nothing
+brings one up until you ask it to. `provision.sh` therefore takes out a
+temporary DHCP lease on `eth0` before it installs anything, because the .NET
+runtime and Technitium both have to be downloaded — the stick only carries
+Alpine's boot packages.
+
+That lease is deliberately not written into `/etc/network/interfaces`. It
+lasts for the provisioning run only; from the next boot onward `dns-ip` owns
+the interface and does its own discovery. So the appliance needs a working
+DHCP server and internet access *while being provisioned*, and only a LAN
+afterwards.
+
+If your NIC does not enumerate as `eth0`, `provision.sh` stops and lists the
+interfaces it found. Changing it means editing `PROVISION_IFACE` in
+`provision.sh` **and** `DNS_IP_IFACE` in `alpine/dns-ip.initd` — both, or the
+appliance will provision and then fail to claim an address.
+
 ### GRUB prints "error: no such device"
 
 Expected and harmless. The stick's `bootx64.efi` (copied verbatim from the
