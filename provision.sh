@@ -361,6 +361,16 @@ restore_medium_ro() {
 setup_network() {
     log "Bringing up the network for provisioning"
 
+    # A live diskless boot has the `networking` service enabled in no runlevel,
+    # so nothing has brought up the loopback interface: lo sits state DOWN.
+    # Everything addressed to 127.0.0.1 then falls through to the DEFAULT
+    # route - out eth0, to the gateway, dropped - so the Technitium readiness
+    # probe and every settings API call hang or time out while external
+    # queries to the claimed address keep working. Observed exactly this on
+    # real hardware.
+    ip link set lo up || die "could not bring up the loopback interface"
+    info "loopback up"
+
     if ! ip link show "$PROVISION_IFACE" >/dev/null 2>&1; then
         _found=$(ip -o link show 2>/dev/null | parse_link_names | tr '\n' ' ')
         die "no interface named $PROVISION_IFACE on this machine.
@@ -412,6 +422,17 @@ iface lo inet loopback
 # subnet, releases the lease, then claims a static address in .53-.59.
 IFACES
     info "eth0 left to the dns-ip service"
+
+    # That interfaces file is only read by the `networking` service - and on a
+    # live diskless boot that service is enabled in NO runlevel, which is how
+    # this appliance ran with loopback permanently down. Enable it so lo comes
+    # up on every boot. eth0 stays absent from the file, so dns-ip still owns
+    # it unchallenged. rc-update exits non-zero if the service is already
+    # enabled, so the symlink is the source of truth, same as install_services.
+    rc-update add networking boot >/dev/null 2>&1 || true
+    [ -e /etc/runlevels/boot/networking ] \
+        || die "could not enable the networking service - loopback would stay DOWN on every reboot"
+    info "networking service enabled in the boot runlevel (brings up lo)"
 
     # Fatal, not a warning. Without a mirror, /etc/apk/repositories holds only
     # the stick's local /media/usb/apks - enough to boot Alpine and nothing

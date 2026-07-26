@@ -198,6 +198,13 @@ LEASESCRIPT
 start() {
     ebegin "Claiming a LAN address for $DNS_IP_IFACE"
 
+    # Defence in depth: the networking service (boot runlevel) owns bringing
+    # lo up, but a down loopback is quietly fatal to everything that talks to
+    # 127.0.0.1 - technitium's start_post, the settings API, local dig - while
+    # external DNS keeps working, which makes it miserable to diagnose. One
+    # idempotent line keeps that failure mode impossible here.
+    ip link set lo up 2>/dev/null
+
     ip link set "$DNS_IP_IFACE" up 2>/dev/null
 
     if ! discover_lease || [ ! -f "$DNS_IP_LEASE" ]; then

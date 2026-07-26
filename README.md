@@ -274,6 +274,27 @@ interfaces it found. Changing it means editing `PROVISION_IFACE` in
 `provision.sh` **and** `DNS_IP_IFACE` in `alpine/dns-ip.initd` — both, or the
 appliance will provision and then fail to claim an address.
 
+### DNS answers from other machines, but 127.0.0.1 hangs on the appliance
+
+If external `dig @<claimed-ip>` works while, on the appliance itself, `curl
+http://127.0.0.1:5380/` (or `dig @127.0.0.1`) hangs, check the loopback
+interface:
+
+```
+ip link show lo        # state DOWN means nothing ever brought it up
+```
+
+A live diskless boot enables Alpine's `networking` service in no runlevel,
+so nothing runs `ifup lo`. With `lo` down there is no `127.0.0.0/8` route,
+and traffic to `127.0.0.1` falls through to the *default* route — out
+`eth0`, to the gateway, dropped. External service keeps working the whole
+time, which makes this failure look like anything but what it is.
+
+`provision.sh` brings `lo` up itself and enables `networking` in the boot
+runlevel; `dns-ip` also raises it defensively at every start. If you hit
+this on an appliance provisioned before that fix: `ip link set lo up`, then
+`rc-update add networking boot`, then `lbu commit -d`.
+
 ### GRUB prints "error: no such device"
 
 Expected and harmless. The stick's `bootx64.efi` (copied verbatim from the
