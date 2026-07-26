@@ -124,7 +124,7 @@ start_post() {
 
     _wait=0
     while [ "$_wait" -lt 60 ]; do
-        curl -fsS -G "$TECHNITIUM_API/api/user/login" \
+        curl -fsS --connect-timeout 5 --max-time 20 -G "$TECHNITIUM_API/api/user/login" \
             --data-urlencode "user=admin" \
             --data-urlencode "pass=${_pass}" \
             >/run/technitium-login.json 2>/dev/null
@@ -149,7 +149,7 @@ start_post() {
         return 0
     fi
 
-    curl -fsS -X POST "$TECHNITIUM_API/api/settings/set" \
+    curl -fsS --connect-timeout 5 --max-time 30 -X POST "$TECHNITIUM_API/api/settings/set" \
         --data-urlencode "token=${_token}" \
         --data-urlencode "dnsServerLocalEndPoints=${_endpoints}" \
         >/run/technitium-settings.json 2>/dev/null

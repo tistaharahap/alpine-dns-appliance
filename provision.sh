@@ -63,11 +63,6 @@ die()  { printf 'ERR %s\n' "$*" >&2; exit 1; }
 
 # ------------------------------------------------------------ pure helpers ---
 
-# Read blocklist URLs from a file and echo them comma-joined for the
-# /api/settings/set blockListUrls parameter. Drops blanks and comments.
-# Skips any URL over the API's 255-character limit, with a warning on stderr:
-# the API rejects the entire request if one entry is too long, so silently
-# passing it through would break blocking altogether.
 # Join the non-comment, non-blank lines of file $1 with commas.
 # $2 caps entry length, skipping longer ones with a warning; 0 means no cap.
 comma_list() {
@@ -90,6 +85,9 @@ comma_list() {
     printf '%s\n' "$_out"
 }
 
+# Blocklist URLs are capped at 255 characters: /api/settings/set rejects the
+# entire request if one entry is longer, so an over-length URL is skipped with
+# a warning rather than silently breaking blocking altogether.
 blocklist_urls() {
     comma_list "$1" "$BLOCKLIST_MAX_URL_LEN"
 }
@@ -240,7 +238,7 @@ api_ok() {
 # cause. Mirrors the login call in alpine/technitium.initd's start_post().
 api_token() {
     _resp="/tmp/technitium-login.json"
-    curl -fsS -G "$TECHNITIUM_API/api/user/login" \
+    curl -fsS --connect-timeout 5 --max-time 20 -G "$TECHNITIUM_API/api/user/login" \
         --data-urlencode "user=admin" \
         --data-urlencode "pass=$1" \
         >"$_resp" 2>/dev/null
@@ -435,7 +433,7 @@ install_technitium() {
     chmod 0700 "$CREDS_DIR"
 
     _tarball="/tmp/DnsServerPortable.tar.gz"
-    curl -fsSL -o "$_tarball" "$TECHNITIUM_URL" || die "could not download Technitium"
+    curl -fsSL --connect-timeout 10 --max-time 900 -o "$_tarball" "$TECHNITIUM_URL" || die "could not download Technitium"
 
     # The upstream URL is unversioned, so the checksum is observed here rather
     # than pinned in the script. Recording it makes an unexpected upstream
@@ -534,7 +532,7 @@ above: either DHCP discovery failed, or all of .53-.59 are already taken."
     _wait=0
     _api_up=0
     while [ "$_wait" -lt 90 ]; do
-        if curl -fsS -o /dev/null "$TECHNITIUM_API/" 2>/dev/null; then
+        if curl -fsS --connect-timeout 2 --max-time 5 -o /dev/null "$TECHNITIUM_API/" 2>/dev/null; then
             _api_up=1
             break
         fi
@@ -610,7 +608,7 @@ configure_technitium() {
     fi
 
     _settings_resp="/tmp/technitium-settings.json"
-    curl -fsS -X POST "$TECHNITIUM_API/api/settings/set" \
+    curl -fsS --connect-timeout 5 --max-time 30 -X POST "$TECHNITIUM_API/api/settings/set" \
         --data-urlencode "token=$_token" \
         --data-urlencode "enableBlocking=true" \
         --data-urlencode "blockListUrls=$_lists" \
@@ -632,7 +630,7 @@ configure_technitium() {
     info "blocklists: $_lists"
 
     _refresh_resp="/tmp/technitium-blocklist-refresh.json"
-    curl -fsS -X POST "$TECHNITIUM_API/api/settings/forceUpdateBlockLists" \
+    curl -fsS --connect-timeout 5 --max-time 30 -X POST "$TECHNITIUM_API/api/settings/forceUpdateBlockLists" \
         --data-urlencode "token=$_token" \
         >"$_refresh_resp" 2>/dev/null
 
@@ -664,7 +662,7 @@ configure_technitium() {
         chmod 0600 "$CREDS_PENDING"
 
         _changepw_resp="/tmp/technitium-changepw.json"
-        curl -fsS -X POST "$TECHNITIUM_API/api/user/changePassword" \
+        curl -fsS --connect-timeout 5 --max-time 30 -X POST "$TECHNITIUM_API/api/user/changePassword" \
             --data-urlencode "token=$_token" \
             --data-urlencode "pass=$_new" \
             >"$_changepw_resp" 2>/dev/null
