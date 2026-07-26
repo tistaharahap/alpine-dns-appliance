@@ -85,15 +85,16 @@ assert_rc 0 0 "assert_rc matches equal codes"
 assert_contains "hello world" "lo wo" "assert_contains finds a substring"
 assert_not_contains "hello world" "banana" "assert_not_contains rejects an absent substring"
 
-# A deliberately failing assertion must be counted, then discounted so this
-# file still reports success overall.
-_before_failed=$ADS_TESTS_FAILED
-assert_eq "a" "b" "(expected-to-fail assertion, output above is intentional)"
-if [ "$ADS_TESTS_FAILED" -eq $((_before_failed + 1)) ]; then
-    ADS_TESTS_FAILED=$_before_failed
-    printf '  ok   a failing assert_eq increments ADS_TESTS_FAILED\n'
+# A failing assertion must actually be counted as a failure - otherwise every
+# later test file could be silently reporting success. Run it in a subshell so
+# this file's own counters are untouched.
+if (
+    assert_eq "a" "b" "intentional failure" >/dev/null 2>&1
+    [ "$ADS_TESTS_FAILED" -eq 1 ] && [ "$ADS_TESTS_RUN" -eq 5 ]
+); then
+    _ads_pass "a failing assert_eq increments ADS_TESTS_FAILED"
 else
-    printf '  FAIL a failing assert_eq did not increment ADS_TESTS_FAILED\n'
+    _ads_fail "a failing assert_eq does not increment ADS_TESTS_FAILED"
 fi
 
 test_summary "test_harness"
@@ -1287,11 +1288,7 @@ assert_eq "" "$(printf '%s' "$_pw" | tr -d 'A-Za-z0-9')" "random_password is alp
 # silently give every appliance the same admin password.
 _pw_a=$(random_password)
 _pw_b=$(random_password)
-if [ "$_pw_a" = "$_pw_b" ]; then
-    assert_eq "<two different passwords>" "$_pw_a and $_pw_b" "random_password output varies"
-else
-    assert_eq "differ" "differ" "random_password output varies between calls"
-fi
+assert_not_contains "$_pw_a" "$_pw_b" "random_password output varies between calls"
 
 test_summary "test_provision"
 ```
