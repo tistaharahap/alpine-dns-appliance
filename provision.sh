@@ -27,6 +27,13 @@ CREDS_FILE="$CREDS_DIR/admin-password"
 CREDS_PENDING="$CREDS_FILE.new"
 BLOCKLIST_MAX_URL_LEN=255
 
+# Overridable so the test suite can feed a fixture instead of the live kernel.
+PROC_MOUNTS="${PROC_MOUNTS:-/proc/mounts}"
+
+# Set to 1 by locate_medium if it remounted the boot medium read-write, so the
+# exit trap can put it back the way Alpine intended.
+MEDIUM_REMOUNTED_RW=0
+
 # Alpine's musl-native .NET. Microsoft's glibc build will not run here.
 # iputils is pinned so that a change in arping's DAD exit-code semantics
 # fails at install time rather than silently claiming an occupied address.
@@ -84,6 +91,43 @@ lbu_media_name() {
 
 random_password() {
     LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24
+}
+
+# Echo the filesystem type mounted at $1, or return 1 if nothing is mounted
+# there. Fields in /proc/mounts are: device mountpoint fstype options ...
+medium_fstype() {
+    _want="$1"
+    while read -r _dev _mnt _type _opts _rest; do
+        if [ "$_mnt" = "$_want" ]; then
+            printf '%s\n' "$_type"
+            return 0
+        fi
+    done < "$PROC_MOUNTS"
+    return 1
+}
+
+# Return 0 if the mount at $1 is read-only.
+#
+# The options must be split on commas and compared whole. A substring match
+# would be wrong: a real appliance's boot medium carries
+# `errors=remount-ro`, which contains "ro" while saying nothing about the
+# mount's current state.
+medium_is_ro() {
+    _want="$1"
+    while read -r _dev _mnt _type _opts _rest; do
+        [ "$_mnt" = "$_want" ] || continue
+        _oifs="$IFS"
+        IFS=,
+        for _opt in $_opts; do
+            if [ "$_opt" = "ro" ]; then
+                IFS="$_oifs"
+                return 0
+            fi
+        done
+        IFS="$_oifs"
+        return 1
+    done < "$PROC_MOUNTS"
+    return 1
 }
 
 # Validate that $1 is a dotted-quad IPv4 address: four dot-separated numeric
@@ -181,16 +225,48 @@ locate_medium() {
     MEDIUM_DEV=$(lbu_media_name "$MEDIUM_DIR")
     info "stick mounted at $MEDIUM_DIR (device $MEDIUM_DEV)"
 
-    if ! touch "$MEDIUM_DIR/.write-test" 2>/dev/null; then
-        die "$MEDIUM_DIR is not writable.
+    # Alpine's diskless mode mounts the boot medium READ-ONLY on purpose - its
+    # stock /etc/fstab carries `/dev/usbdisk /media/usb vfat noauto,ro` - and
+    # lbu remounts it rw only for the duration of a commit. So "is it writable
+    # right now" is the wrong question and would reject a perfectly good stick.
+    # What actually matters is the filesystem: ISO9660 can never persist
+    # anything, vfat can once remounted.
+    _fstype=$(medium_fstype "$MEDIUM_DIR") \
+        || die "nothing is mounted at $MEDIUM_DIR - cannot locate the boot medium"
+    info "filesystem is $_fstype"
 
-This stick cannot persist the appliance configuration, which means it was not
-built by build-usb.sh - most likely the ISO was dd'd onto it, producing a
-read-only ISO9660 filesystem. See the 'Read-only stick' section of README.md
-for the setup-bootable recovery procedure."
+    if [ "$_fstype" = "iso9660" ]; then
+        die "$MEDIUM_DIR is an ISO9660 filesystem, which is permanently read-only.
+
+This stick cannot persist the appliance configuration. It was not built by
+build-usb.sh - most likely the ISO was dd'd onto it. See the 'Read-only stick'
+section of README.md for the setup-bootable recovery procedure."
     fi
-    rm -f "$MEDIUM_DIR/.write-test"
-    info "stick is writable"
+
+    # Hold the medium rw for the whole run: setup-apkcache writes to it, and
+    # the exit trap puts it back to ro so an unexpected power cut cannot
+    # corrupt the stick.
+    if medium_is_ro "$MEDIUM_DIR"; then
+        mount -o remount,rw "$MEDIUM_DIR" \
+            || die "could not remount $MEDIUM_DIR read-write.
+
+The medium is $_fstype, so it should be writable. A stick that refuses to
+remount rw is usually failing, or has its physical write-protect switch on."
+        MEDIUM_REMOUNTED_RW=1
+        info "remounted read-write for provisioning (restored to read-only at the end)"
+    else
+        info "already mounted read-write"
+    fi
+}
+
+# Put the boot medium back to read-only if we remounted it. Runs on every exit
+# path, including failures, so an aborted run does not leave the stick writable.
+restore_medium_ro() {
+    if [ "$MEDIUM_REMOUNTED_RW" = "1" ]; then
+        sync
+        mount -o remount,ro "$MEDIUM_DIR" 2>/dev/null \
+            && MEDIUM_REMOUNTED_RW=0
+    fi
 }
 
 setup_base() {
@@ -579,6 +655,7 @@ REPORT
 }
 
 main() {
+    trap restore_medium_ro EXIT INT TERM
     require_root
     locate_medium
     setup_base

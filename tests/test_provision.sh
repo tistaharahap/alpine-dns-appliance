@@ -77,6 +77,36 @@ assert_eq "sdb1" \
 assert_eq "sda1" "$(lbu_media_name "$_tmp/media/sda1/")" \
     "lbu_media_name strips a trailing slash before taking the basename"
 
+# --- medium_fstype / medium_is_ro -------------------------------------------
+# Alpine's diskless mode mounts the boot medium READ-ONLY on purpose
+# (/etc/fstab ships `/dev/usbdisk /media/usb vfat noauto,ro`), and lbu remounts
+# it rw only for the duration of a commit. So "can I write to it right now" is
+# the wrong question - the right one is "what filesystem is it, and can it be
+# remounted rw". The first line below is copied verbatim from a real appliance.
+cat > "$_tmp/mounts" <<'MOUNTS'
+/dev/sda1 /media/usb vfat ro,relatime,fmask=0022,dmask=0022,codepage=437,iocharset=utf8,shortname=mixed,errors=remount-ro 0 0
+/dev/sdb1 /media/writable vfat rw,relatime 0 0
+/dev/sr0 /media/cdrom iso9660 ro,relatime 0 0
+/dev/sdc1 /media/tricky vfat rw,relatime,errors=remount-ro 0 0
+MOUNTS
+PROC_MOUNTS="$_tmp/mounts"
+
+assert_eq "vfat" "$(medium_fstype /media/usb)" "medium_fstype reads the type of a ro vfat medium"
+assert_eq "iso9660" "$(medium_fstype /media/cdrom)" "medium_fstype identifies a dd'd ISO medium"
+medium_fstype /media/not-mounted >/dev/null 2>&1
+assert_rc 1 $? "medium_fstype fails when the mountpoint is not mounted"
+
+medium_is_ro /media/usb
+assert_rc 0 $? "medium_is_ro detects the read-only boot medium"
+medium_is_ro /media/writable
+assert_rc 1 $? "medium_is_ro returns false for an rw medium"
+
+# `errors=remount-ro` contains the substring "ro" and appears on the real
+# appliance's mount line. Matching options as substrings rather than as whole
+# comma-separated fields would call every such mount read-only.
+medium_is_ro /media/tricky
+assert_rc 1 $? "medium_is_ro is not fooled by errors=remount-ro on an rw mount"
+
 # --- random_password --------------------------------------------------------
 _pw=$(random_password)
 assert_eq "24" "$(printf '%s' "$_pw" | wc -c | tr -d ' ')" "random_password is 24 characters"

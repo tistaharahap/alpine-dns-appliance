@@ -326,15 +326,46 @@ transport Technitium needs for DoQ and DoH3, and `icu-libs` plus
 back to invariant-globalization mode (`DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`),
 under which Technitium misbehaves on internationalised domain names.
 
-### Read-only stick / "the stick is not writable"
+### The boot medium is mounted read-only — this is normal
 
-`provision.sh` checks that it can actually write to the boot medium before
-doing anything else, and refuses to continue if it can't. Seeing that
-message means the stick holds a read-only ISO9660 filesystem — the kind
-you get by `dd`-ing the Alpine ISO directly onto a drive — which leaves
-`lbu commit` nowhere to persist the appliance's configuration.
-`build-usb.sh` never produces a stick like this; if you hit this error, the
-stick in hand wasn't built with it.
+On a booted appliance, `/media/usb` is mounted **read-only**:
+
+```
+/dev/sda1 /media/usb vfat ro,relatime,...
+```
+
+That is Alpine's deliberate design, not a fault. Its stock `/etc/fstab`
+carries `/dev/usbdisk /media/usb vfat noauto,ro`, and `lbu` remounts the
+medium read-write only for the moments it is actually committing, then puts
+it back. Keeping it read-only most of the time is what makes the appliance
+tolerant of having its power cut — there is no window in which a write can
+be interrupted mid-flight.
+
+`provision.sh` remounts the medium read-write for the duration of its run
+(it needs to write the apk cache) and restores read-only on exit, including
+when it exits with an error. If a run is interrupted so violently that the
+trap never fires, the stick is simply left writable; the next run puts it
+back. You can also restore it by hand:
+
+```
+mount -o remount,ro /media/usb
+```
+
+### Read-only stick / "this stick cannot persist the appliance configuration"
+
+`provision.sh` refuses to continue if the boot medium is an **ISO9660**
+filesystem, which is permanently read-only and leaves `lbu commit` nowhere
+to persist anything. That is what `dd`-ing the Alpine ISO directly onto a
+drive produces. `build-usb.sh` never produces a stick like this; if you hit
+this error, the stick in hand wasn't built with it.
+
+Note the distinction from the section above: a `vfat` medium mounted `ro` is
+fine and expected — `provision.sh` remounts it. Only `iso9660` is fatal. You
+can tell which you have with:
+
+```
+grep /media/usb /proc/mounts
+```
 
 To recover a `dd`'d stick without re-imaging it, you need a **second** USB
 stick:
