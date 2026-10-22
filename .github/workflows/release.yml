@@ -1,0 +1,54 @@
+# Cut a release when a version tag (v1.2.3) is pushed: run the test suite,
+# package the files a user needs to build a stick, and publish them as a
+# GitHub Release.
+#
+# Tests run on macOS because build-usb.sh (and its tests) use BSD tools -
+# `stat -f`, diskutil, hdiutil - that do not exist on a Linux runner.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # shellcheck is deliberately not installed: the tree is not yet
+      # shellcheck-clean, so run-tests.sh reports it as SKIPPED here.
+      - name: Run tests
+        run: ./tests/run-tests.sh
+
+      - name: Package
+        id: package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          name="alpine-dns-appliance-${TAG}"
+          mkdir -p dist
+          # Only what build-usb.sh needs at build time, plus the README.
+          # git archive keeps the executable bits on the two scripts.
+          git archive --format=tar.gz --prefix="${name}/" \
+              -o "dist/${name}.tar.gz" "$TAG" \
+              build-usb.sh provision.sh alpine config README.md
+          (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          NAME: ${{ steps.package.outputs.name }}
+        run: |
+          gh release create "$TAG" \
+              "dist/${NAME}.tar.gz" \
+              "dist/${NAME}.tar.gz.sha256" \
+              --title "$TAG" \
+              --generate-notes \
+              --verify-tag

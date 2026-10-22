@@ -535,3 +535,20 @@ A couple of things worth knowing before touching the scripts:
   test file sources it — keep top-level statements limited to the
   established pattern.
 
+## Releasing
+
+Push a version tag:
+
+```
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+`.github/workflows/release.yml` then runs the test suite on a macOS runner
+(without shellcheck, which the tree doesn't pass yet) and, if it passes, publishes a GitHub Release carrying
+`alpine-dns-appliance-v1.0.0.tar.gz` and its `.sha256`. The tarball holds
+exactly what `build-usb.sh` needs — `build-usb.sh`, `provision.sh`,
+`alpine/`, `config/` — plus this README, so a user can download it, verify
+it, extract it, and run `./build-usb.sh` without cloning the repo. A failing
+test means no release; fix it, then delete and re-push the tag.
+
