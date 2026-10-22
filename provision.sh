@@ -137,8 +137,12 @@ lbu_media_name() {
     printf '%s\n' "${_dir##*/}"
 }
 
+# Read a bounded slice of /dev/urandom rather than all of it. An unbounded
+# `tr < /dev/urandom` only stops when SIGPIPE kills it after head exits; where
+# SIGPIPE is ignored (CI runners do this) it spins forever. 4096 random bytes
+# yield ~990 alphanumerics on average, so 24 is never short in practice.
 random_password() {
-    LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24
+    head -c 4096 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 24
 }
 
 # Echo every non-loopback interface name from `ip -o link show` on stdin, one

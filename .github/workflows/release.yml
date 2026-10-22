@@ -17,6 +17,8 @@ permissions:
 jobs:
   release:
     runs-on: macos-latest
+    # The suite finishes in seconds; anything longer is a hang.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
